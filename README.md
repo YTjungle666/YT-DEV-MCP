@@ -7,7 +7,7 @@
 | 工具 | 作用 |
 |---|---|
 | `dev_projects` | 全局视图：每个项目的状态行、分支/脏文件/未推提交、活跃 worker |
-| `dev_plan` | 把 PLAN.md 解析成结构化状态（状态行、决策表、阶段进度、YT 待办、下一步） |
+| `dev_plan` | 把 PLAN.md 解析成结构化状态（状态行、决策表、阶段进度、待办、下一步） |
 | `dev_plan_update` | 定点写回计划：改状态行 / 勾一个步骤 / 追加 run 记录，返回 diff，匹配不唯一即拒写 |
 | `dev_worker` | codex worker 生命周期：`start` / `start_batch` / `status` / `list` / `kill` |
 | `dev_review` | 独立评审（强模型线），只看 diff，输出 JSON verdict + findings |
