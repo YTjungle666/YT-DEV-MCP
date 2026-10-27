@@ -192,9 +192,10 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
     } else {
         actions.push("git push".into());
     }
-    actions.push(format!(
-        "保护 main：禁止强推/删除，要求 ci 通过（enforce_admins=true，不强制 PR —— 单人仓库）"
-    ));
+    actions.push(
+        "保护 main：禁止强推/删除，要求 ci 通过（PR 合并前必须绿；admin 可直推，单人仓库不锁死自己）"
+            .to_string(),
+    );
 
     let mut out = format!(
         "== publish {project} → {slug} ({})\n",
@@ -269,7 +270,7 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
     // --- protection + verify
     let payload = json!({
         "required_status_checks": {"strict": true, "contexts": ["ci"]},
-        "enforce_admins": true,
+        "enforce_admins": false,
         "required_pull_request_reviews": null,
         "restrictions": null,
         "allow_force_pushes": false,
