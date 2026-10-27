@@ -30,6 +30,11 @@ pub fn list_projects() -> Vec<String> {
     v
 }
 
+fn status_line_re() -> &'static Regex {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*(?:-\s*)?(?:状态|版本)\s*[：:]").unwrap())
+}
+
 fn section_bounds(lines: &[&str], needle: &str) -> Option<(usize, usize)> {
     let start = lines
         .iter()
@@ -196,7 +201,7 @@ pub fn update(project: &str, ops: &[Value]) -> Result<String, String> {
         match op["kind"].as_str().unwrap_or("") {
             "set_status" => {
                 let new = op["value"].as_str().ok_or("set_status needs value")?;
-                let re = Regex::new(r"^\s*(?:-\s*)?(?:状态|版本)\s*[：:]").unwrap();
+                let re = status_line_re();
                 let hits: Vec<usize> = lines
                     .iter()
                     .enumerate()
