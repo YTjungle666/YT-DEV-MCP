@@ -272,3 +272,29 @@ pub fn update(project: &str, ops: &[Value]) -> Result<String, String> {
     std::fs::write(&p, &updated).map_err(|e| format!("write {}: {e}", p.display()))?;
     Ok(format!("{}\n\nwritten: {}", log.join("\n"), p.display()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const SAMPLE: &str = "# t\n\n状态：v1（测试）\n\n## 3. 分阶段实施\n\n### P0 骨架\n- [x] 一\n- [ ] 二\n- 说明行\n\n## 9. 下一步\n\n1. 待定\n";
+
+    #[test]
+    fn parses_status_phases_and_next() {
+        let p = parse(SAMPLE);
+        assert_eq!(p.status_line.as_deref(), Some("状态：v1（测试）"));
+        assert_eq!(p.phases.len(), 1);
+        assert_eq!(p.phases[0]["done"], json!(1));
+        assert_eq!(p.phases[0]["total"], json!(2));
+        assert_eq!(p.phases[0]["steps"], json!(3));
+        assert_eq!(p.next_step.len(), 1);
+    }
+
+    #[test]
+    fn empty_plan_degrades_without_panicking() {
+        let p = parse("# 只有标题\n");
+        assert!(p.status_line.is_none());
+        assert!(p.phases.is_empty());
+    }
+}
