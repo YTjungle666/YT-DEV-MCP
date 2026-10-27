@@ -75,7 +75,12 @@ pub fn parse(text: &str) -> Plan {
     let dec_re = Regex::new(r"^\|\s*(D\d+)\s*\|").unwrap();
     for l in &lines {
         if let Some(c) = dec_re.captures(l) {
-            let cells: Vec<&str> = l.trim().trim_matches('|').split('|').map(|c| c.trim()).collect();
+            let cells: Vec<&str> = l
+                .trim()
+                .trim_matches('|')
+                .split('|')
+                .map(|c| c.trim())
+                .collect();
             decisions.push(json!({
                 "id": c.get(1).unwrap().as_str(),
                 "text": cells.get(1).cloned().unwrap_or(""),
@@ -104,7 +109,9 @@ pub fn parse(text: &str) -> Plan {
                 let t = l.trim();
                 if t.starts_with("- ") && t.len() > 2 {
                     if let Some((_, items)) = cur.as_mut() {
-                        items.push(json!({"done": null, "text": t.trim_start_matches("- ").to_string()}));
+                        items.push(
+                            json!({"done": null, "text": t.trim_start_matches("- ").to_string()}),
+                        );
                     }
                 }
             }
@@ -121,7 +128,9 @@ pub fn parse(text: &str) -> Plan {
                     .iter()
                     .filter(|l| {
                         let t = l.trim();
-                        t.starts_with("- ") || t.starts_with("1.") || t.chars().next().is_some_and(|c| c.is_ascii_digit())
+                        t.starts_with("- ")
+                            || t.starts_with("1.")
+                            || t.chars().next().is_some_and(|c| c.is_ascii_digit())
                     })
                     .map(|l| l.trim().to_string())
                     .collect()
@@ -129,20 +138,35 @@ pub fn parse(text: &str) -> Plan {
             .unwrap_or_default()
     };
     let verify = bullets("验证");
-    let yt_todos = bullets("YT 侧待办").into_iter().chain(bullets("YT 待办")).collect();
+    let yt_todos = bullets("YT 侧待办")
+        .into_iter()
+        .chain(bullets("YT 待办"))
+        .collect();
     let next_step = bullets("下一步");
 
-    Plan { status_line, decisions, phases, verify, yt_todos, next_step, raw_sections: Vec::new() }
+    Plan {
+        status_line,
+        decisions,
+        phases,
+        verify,
+        yt_todos,
+        next_step,
+        raw_sections: Vec::new(),
+    }
 }
 
 fn phase_json(title: &str, items: &[Value]) -> Value {
     let checkable: Vec<&Value> = items.iter().filter(|i| !i["done"].is_null()).collect();
-    let done = checkable.iter().filter(|i| i["done"] == json!(true)).count();
+    let done = checkable
+        .iter()
+        .filter(|i| i["done"] == json!(true))
+        .count();
     json!({"title": title, "done": done, "total": checkable.len(), "steps": items.len(), "items": items})
 }
 
 pub fn describe(project: &str) -> Result<Value, String> {
-    let p = plan_path(project).ok_or_else(|| format!("no PLAN.md under {}", plan_root().join(project).display()))?;
+    let p = plan_path(project)
+        .ok_or_else(|| format!("no PLAN.md under {}", plan_root().join(project).display()))?;
     let text = std::fs::read_to_string(&p).map_err(|e| format!("read {}: {e}", p.display()))?;
     let plan = parse(&text);
     let mtime = std::fs::metadata(&p).ok().and_then(|m| m.modified().ok());
@@ -173,9 +197,17 @@ pub fn update(project: &str, ops: &[Value]) -> Result<String, String> {
             "set_status" => {
                 let new = op["value"].as_str().ok_or("set_status needs value")?;
                 let re = Regex::new(r"^\s*(?:-\s*)?(?:状态|版本)\s*[：:]").unwrap();
-                let hits: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| re.is_match(l)).map(|(i, _)| i).collect();
+                let hits: Vec<usize> = lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| re.is_match(l))
+                    .map(|(i, _)| i)
+                    .collect();
                 if hits.len() != 1 {
-                    return Err(format!("set_status: {} matching status lines (need exactly 1)", hits.len()));
+                    return Err(format!(
+                        "set_status: {} matching status lines (need exactly 1)",
+                        hits.len()
+                    ));
                 }
                 let i = hits[0];
                 let old = lines[i].clone();
@@ -192,15 +224,36 @@ pub fn update(project: &str, ops: &[Value]) -> Result<String, String> {
                     .iter()
                     .position(|l| l.starts_with("###") && l.contains(phase))
                     .ok_or_else(|| format!("check_step: no phase heading containing {phase:?}"))?;
-                let end = lines.iter().enumerate().skip(start + 1).find(|(_, l)| l.starts_with("###") || l.starts_with("## ")).map(|(i, _)| i).unwrap_or(lines.len());
-                let hits: Vec<usize> = (start + 1..end).filter(|&i| checkbox(&lines[i]).is_some()).collect();
-                let i = *hits.get(idx).ok_or_else(|| format!("check_step: phase {phase:?} has {} steps, index {idx} out of range", hits.len()))?;
+                let end = lines
+                    .iter()
+                    .enumerate()
+                    .skip(start + 1)
+                    .find(|(_, l)| l.starts_with("###") || l.starts_with("## "))
+                    .map(|(i, _)| i)
+                    .unwrap_or(lines.len());
+                let hits: Vec<usize> = (start + 1..end)
+                    .filter(|&i| checkbox(&lines[i]).is_some())
+                    .collect();
+                let i = *hits.get(idx).ok_or_else(|| {
+                    format!(
+                        "check_step: phase {phase:?} has {} steps, index {idx} out of range",
+                        hits.len()
+                    )
+                })?;
                 let old = lines[i].clone();
-                lines[i] = if done { old.replacen("- [ ]", "- [x]", 1) } else { old.replacen("- [x]", "- [ ]", 1) };
+                lines[i] = if done {
+                    old.replacen("- [ ]", "- [x]", 1)
+                } else {
+                    old.replacen("- [x]", "- [ ]", 1)
+                };
                 log.push(format!("L{}: -{old}\n      +{}", i + 1, lines[i]));
             }
             "append_run_note" => {
-                let note = op["text"].as_str().ok_or("append_run_note needs text")?.trim().to_string();
+                let note = op["text"]
+                    .as_str()
+                    .ok_or("append_run_note needs text")?
+                    .trim()
+                    .to_string();
                 let at = lines
                     .iter()
                     .position(|l| l.starts_with("## ") && l.contains("下一步"))
@@ -219,4 +272,3 @@ pub fn update(project: &str, ops: &[Value]) -> Result<String, String> {
     std::fs::write(&p, &updated).map_err(|e| format!("write {}: {e}", p.display()))?;
     Ok(format!("{}\n\nwritten: {}", log.join("\n"), p.display()))
 }
-

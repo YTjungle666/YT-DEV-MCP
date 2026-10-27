@@ -20,7 +20,9 @@ fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(req) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(req) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let id = req.get("id").cloned();
         let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
         // Notifications (no id) never get a response.
@@ -39,7 +41,9 @@ fn main() {
         };
         let msg = match result {
             Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
-            Err((code, m)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": m}}),
+            Err((code, m)) => {
+                json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": m}})
+            }
         };
         if writeln!(stdout, "{msg}").is_err() || stdout.flush().is_err() {
             break;

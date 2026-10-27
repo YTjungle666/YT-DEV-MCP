@@ -2,7 +2,9 @@
 //! by a model: counts + top items, never unbounded dumps.
 
 use crate::plan;
-use crate::util::{cap_lines, config_dir, epoch, git, home, out_str, plan_root, redact, run, which};
+use crate::util::{
+    cap_lines, config_dir, epoch, git, home, out_str, plan_root, redact, run, which,
+};
 use serde_json::{json, Value};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -97,7 +99,9 @@ pub fn call(params: &Value) -> Result<Value, (i32, String)> {
     };
     Ok(match out {
         Ok(text) => json!({"content": [{"type": "text", "text": text}]}),
-        Err(e) => json!({"content": [{"type": "text", "text": format!("error: {e}")}], "isError": true}),
+        Err(e) => {
+            json!({"content": [{"type": "text", "text": format!("error: {e}")}], "isError": true})
+        }
     })
 }
 
@@ -145,23 +149,47 @@ fn projects() -> Result<String, String> {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let parsed = plan::parse(&text);
         let status = parsed.status_line.clone().unwrap_or_else(|| "?".into());
-        let age = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()).map(crate::util::age_secs).unwrap_or(0);
+        let age = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(crate::util::age_secs)
+            .unwrap_or(0);
         let (repo, branch, dirty, unpushed) = match repo_of(&p) {
             Some(r) if is_git(&r) => {
                 let br = git(&r, &["rev-parse", "--abbrev-ref", "HEAD"]);
-                let d = git(&r, &["status", "--porcelain"]).lines().filter(|l| !l.trim().is_empty()).count();
+                let d = git(&r, &["status", "--porcelain"])
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .count();
                 let u = git(&r, &["rev-list", "--count", "@{u}..HEAD"]);
                 (r.display().to_string(), br, d.to_string(), u)
             }
-            Some(r) => (format!("{} (not git)", r.display()), "-".into(), "-".into(), "-".into()),
+            Some(r) => (
+                format!("{} (not git)", r.display()),
+                "-".into(),
+                "-".into(),
+                "-".into(),
+            ),
             None => ("(unresolved)".into(), "-".into(), "-".into(), "-".into()),
         };
-        let running: Vec<&str> = active.iter().filter(|(_, pr)| pr == &p).map(|(id, _)| id.as_str()).collect();
-        let gitcol = if branch == "-" { "-".to_string() } else { format!("{branch} {dirty} dirty, {unpushed} unpushed") };
+        let running: Vec<&str> = active
+            .iter()
+            .filter(|(_, pr)| pr == &p)
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let gitcol = if branch == "-" {
+            "-".to_string()
+        } else {
+            format!("{branch} {dirty} dirty, {unpushed} unpushed")
+        };
         rows.push(format!(
             "{p} | {status} | plan {}d ago | {gitcol} | {repo}{}",
             age / 86400,
-            if running.is_empty() { String::new() } else { format!(" | runs: {}", running.join(",")) }
+            if running.is_empty() {
+                String::new()
+            } else {
+                format!(" | runs: {}", running.join(","))
+            }
         ));
     }
     let mut s = String::from("project | status | plan | git | repo\n");
@@ -185,7 +213,9 @@ fn runs() -> Vec<(String, Value)> {
     let mut out = Vec::new();
     for p in plan::list_projects() {
         let dir = runs_dir(&p);
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.filter_map(|e| e.ok()) {
             let path = e.path();
             if path.extension().and_then(|x| x.to_str()) != Some("json") {
@@ -193,7 +223,11 @@ fn runs() -> Vec<(String, Value)> {
             }
             if let Ok(t) = std::fs::read_to_string(&path) {
                 if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                    let id = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                    let id = path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
                     out.push((id, v));
                 }
             }
@@ -212,8 +246,20 @@ fn worker(a: &Value) -> Result<String, String> {
         "start" => {
             let project = a["project"].as_str().unwrap_or("");
             let task = a["task"].as_str().ok_or("start needs task")?;
-            let repo = a["cwd"].as_str().map(PathBuf::from).or_else(|| repo_of(project)).ok_or("cannot resolve repo (add ~/.config/ytdev/projects.toml)")?;
-            let plan_path = plan::plan_path(project).map(|p| p.display().to_string()).unwrap_or_else(|| plan_root().join(project).join("PLAN.md").display().to_string());
+            let repo = a["cwd"]
+                .as_str()
+                .map(PathBuf::from)
+                .or_else(|| repo_of(project))
+                .ok_or("cannot resolve repo (add ~/.config/ytdev/projects.toml)")?;
+            let plan_path = plan::plan_path(project)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| {
+                    plan_root()
+                        .join(project)
+                        .join("PLAN.md")
+                        .display()
+                        .to_string()
+                });
             let prompt = build_prompt(&plan_path, project, task);
             let dir = runs_dir(project);
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -222,11 +268,15 @@ fn worker(a: &Value) -> Result<String, String> {
             let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
             let base = git(&repo, &["rev-parse", "HEAD"]);
             let mut cmd = Command::new(which("codex").ok_or("codex not on PATH")?);
-            cmd.args(["exec", "--dangerously-bypass-approvals-and-sandbox", &prompt])
-                .current_dir(&repo)
-                .stdin(Stdio::null())
-                .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
-                .stderr(Stdio::from(log));
+            cmd.args([
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                &prompt,
+            ])
+            .current_dir(&repo)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
+            .stderr(Stdio::from(log));
             unsafe {
                 cmd.pre_exec(|| {
                     libc_setsid();
@@ -239,19 +289,39 @@ fn worker(a: &Value) -> Result<String, String> {
                 "base_commit": base, "pid": child.id(), "started": epoch(), "status": "running",
                 "log": log_path.display().to_string()
             });
-            std::fs::write(dir.join(format!("{id}.json")), serde_json::to_string_pretty(&meta).unwrap()).map_err(|e| e.to_string())?;
-            Ok(format!("started {id}\npid {}\nlog {}\ncwd {}", child.id(), log_path.display(), repo.display()))
+            std::fs::write(
+                dir.join(format!("{id}.json")),
+                serde_json::to_string_pretty(&meta).unwrap(),
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(format!(
+                "started {id}\npid {}\nlog {}\ncwd {}",
+                child.id(),
+                log_path.display(),
+                repo.display()
+            ))
         }
         "status" => {
-            let want = a["run_id"].as_str().or(a["project"].as_str()).ok_or("status needs run_id or project")?;
-            let Some((id, meta)) = runs().into_iter().find(|(id, m)| id == want || m["project"] == json!(want)) else {
+            let want = a["run_id"]
+                .as_str()
+                .or(a["project"].as_str())
+                .ok_or("status needs run_id or project")?;
+            let Some((id, meta)) = runs()
+                .into_iter()
+                .find(|(id, m)| id == want || m["project"] == json!(want))
+            else {
                 return Err(format!("no run {want}"));
             };
             let pid = meta["pid"].as_i64().unwrap_or(0);
             let alive = pid_alive(pid);
             let log = PathBuf::from(meta["log"].as_str().unwrap_or(""));
-            let tail = std::fs::read_to_string(&log).map(|t| cap_lines(&t, 40)).unwrap_or_default();
-            let log_age = std::fs::metadata(&log).ok().and_then(|m| m.modified().ok()).map(crate::util::age_secs);
+            let tail = std::fs::read_to_string(&log)
+                .map(|t| cap_lines(&t, 40))
+                .unwrap_or_default();
+            let log_age = std::fs::metadata(&log)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(crate::util::age_secs);
             let repo = PathBuf::from(meta["cwd"].as_str().unwrap_or("."));
             let base = meta["base_commit"].as_str().unwrap_or("HEAD");
             let diffstat = git(&repo, &["diff", "--stat", base]);
@@ -285,7 +355,9 @@ fn worker(a: &Value) -> Result<String, String> {
             Ok(s)
         }
         "kill" => {
-            let id = a["run_id"].as_str().ok_or("kill needs run_id (explicit, by id)")?;
+            let id = a["run_id"]
+                .as_str()
+                .ok_or("kill needs run_id (explicit, by id)")?;
             let Some((_, meta)) = runs().into_iter().find(|(rid, _)| rid == id) else {
                 return Err(format!("no run {id}"));
             };
@@ -301,7 +373,9 @@ fn worker(a: &Value) -> Result<String, String> {
                 }
             }
             let _ = run("kill", &["-KILL", &pid.to_string()], None);
-            Ok(format!("run {id}: killed (SIGTERM ignored 10s, sent SIGKILL)"))
+            Ok(format!(
+                "run {id}: killed (SIGTERM ignored 10s, sent SIGKILL)"
+            ))
         }
         other => Err(format!("unknown action {other}")),
     }
@@ -336,7 +410,11 @@ fn toml_version(t: &str) -> Option<String> {
         }
         if in_ver_table {
             if let Some(v) = l.strip_prefix("version") {
-                return Some(v.trim_start_matches([' ', '=']).trim_matches('"').to_string());
+                return Some(
+                    v.trim_start_matches([' ', '='])
+                        .trim_matches('"')
+                        .to_string(),
+                );
             }
         }
     }
@@ -353,7 +431,8 @@ fn cap1(s: &str, n: usize) -> String {
 }
 
 fn build_prompt(plan_path: &str, project: &str, task: &str) -> String {
-    let tpl = std::fs::read_to_string(config_dir().join("worker-prompt.md")).unwrap_or_else(|_| DEFAULT_PROMPT.into());
+    let tpl = std::fs::read_to_string(config_dir().join("worker-prompt.md"))
+        .unwrap_or_else(|_| DEFAULT_PROMPT.into());
     tpl.replace("{plan_path}", plan_path)
         .replace("{project}", project)
         .replace("{task}", task)
@@ -365,11 +444,24 @@ const DEFAULT_PROMPT: &str = "项目：{project}\n计划：{plan_path}（先读�
 
 fn review(a: &Value) -> Result<String, String> {
     let (repo, base, task) = if let Some(id) = a["run_id"].as_str() {
-        let (_, m) = runs().into_iter().find(|(rid, _)| rid == id).ok_or(format!("no run {id}"))?;
-        (PathBuf::from(m["cwd"].as_str().unwrap_or(".")), m["base_commit"].as_str().unwrap_or("HEAD").to_string(), m["task"].as_str().unwrap_or("").to_string())
+        let (_, m) = runs()
+            .into_iter()
+            .find(|(rid, _)| rid == id)
+            .ok_or(format!("no run {id}"))?;
+        (
+            PathBuf::from(m["cwd"].as_str().unwrap_or(".")),
+            m["base_commit"].as_str().unwrap_or("HEAD").to_string(),
+            m["task"].as_str().unwrap_or("").to_string(),
+        )
     } else {
-        let p = a["project"].as_str().ok_or("review needs run_id or project")?;
-        (repo_of(p).ok_or(format!("cannot resolve repo for {p}"))?, a["base"].as_str().unwrap_or("HEAD").to_string(), String::new())
+        let p = a["project"]
+            .as_str()
+            .ok_or("review needs run_id or project")?;
+        (
+            repo_of(p).ok_or(format!("cannot resolve repo for {p}"))?,
+            a["base"].as_str().unwrap_or("HEAD").to_string(),
+            String::new(),
+        )
     };
     let prompt = format!(
         "你是独立评审者。只评审 `git diff {base}` 的改动（必要时读相关文件）。任务背景：{task}\n\
@@ -378,11 +470,23 @@ fn review(a: &Value) -> Result<String, String> {
          没有问题时 findings 为空数组。不要修改任何文件。"
     );
     let mut cmd = Command::new(which("codex").ok_or("codex not on PATH")?);
-    cmd.args(["exec", "--profile", "strong", "--dangerously-bypass-approvals-and-sandbox", &prompt])
-        .current_dir(&repo)
-        .stdin(Stdio::null());
-    let out = cmd.output().map_err(|e| format!("run codex: {e}"))?;
-    let text = out_str(&out);
+    let out_file = std::env::temp_dir().join(format!("ytdev-review-{}.json", epoch()));
+    let out_s = out_file.to_string_lossy().into_owned();
+    cmd.args([
+        "exec",
+        "--profile",
+        "strong",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-o",
+        out_s.as_str(),
+        &prompt,
+    ])
+    .current_dir(&repo)
+    .stdin(Stdio::null());
+    let _out = cmd.output().map_err(|e| format!("run codex: {e}"))?;
+    // stderr carries the session banner and hook lines; the answer is in the -o file.
+    let text = std::fs::read_to_string(&out_file).unwrap_or_else(|_| String::new());
+    let _ = std::fs::remove_file(&out_file);
     let json_slice = match (text.find('{'), text.rfind('}')) {
         (Some(s), Some(e)) if e > s => Some(&text[s..=e]),
         _ => None,
@@ -391,16 +495,27 @@ fn review(a: &Value) -> Result<String, String> {
     match parsed {
         Some(v) => {
             let findings = v["findings"].as_array().cloned().unwrap_or_default();
-            let mut s = format!("verdict: {}\nfindings: {}\n", v["verdict"].as_str().unwrap_or("?"), findings.len());
+            let mut s = format!(
+                "verdict: {}\nfindings: {}\n",
+                v["verdict"].as_str().unwrap_or("?"),
+                findings.len()
+            );
             for f in findings.iter().take(MAX_ITEMS) {
-                s.push_str(&format!("- [{}] {}:{} {}\n  → {}\n",
-                    f["severity"].as_str().unwrap_or("?"), f["file"].as_str().unwrap_or("-"),
-                    f["line"].as_i64().unwrap_or(0), f["issue"].as_str().unwrap_or(""),
-                    f["suggestion"].as_str().unwrap_or("")));
+                s.push_str(&format!(
+                    "- [{}] {}:{} {}\n  → {}\n",
+                    f["severity"].as_str().unwrap_or("?"),
+                    f["file"].as_str().unwrap_or("-"),
+                    f["line"].as_i64().unwrap_or(0),
+                    f["issue"].as_str().unwrap_or(""),
+                    f["suggestion"].as_str().unwrap_or("")
+                ));
             }
             Ok(s)
         }
-        None => Ok(format!("parse: failed (expected JSON from reviewer)\n\n{}", cap_lines(&text, 30))),
+        None => Ok(format!(
+            "parse: failed (expected JSON from reviewer)\n\n{}",
+            cap_lines(&text, 30)
+        )),
     }
 }
 
@@ -414,7 +529,10 @@ fn gate(a: &Value) -> Result<String, String> {
     let mut steps: Vec<(&str, Vec<&str>)> = Vec::new();
     if repo.join("Cargo.toml").is_file() {
         steps.push(("fmt", vec!["cargo", "fmt", "--check"]));
-        steps.push(("clippy", vec!["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]));
+        steps.push((
+            "clippy",
+            vec!["cargo", "clippy", "--all-targets", "--", "-D", "warnings"],
+        ));
         steps.push(("test", vec!["cargo", "test"]));
         if full {
             steps.push(("build-release", vec!["cargo", "build", "--release"]));
@@ -427,11 +545,18 @@ fn gate(a: &Value) -> Result<String, String> {
         if pkg.contains("\"test\"") {
             steps.push(("test", vec!["npm", "test"]));
         }
-    } else if repo.join("Makefile").is_file() && std::fs::read_to_string(repo.join("Makefile")).unwrap_or_default().contains("verify:") {
+    } else if repo.join("Makefile").is_file()
+        && std::fs::read_to_string(repo.join("Makefile"))
+            .unwrap_or_default()
+            .contains("verify:")
+    {
         steps.push(("verify", vec!["make", "verify"]));
     }
     if steps.is_empty() {
-        return Err(format!("no gate detected in {} (Cargo.toml/package.json/make verify)", repo.display()));
+        return Err(format!(
+            "no gate detected in {} (Cargo.toml/package.json/make verify)",
+            repo.display()
+        ));
     }
     let mut report = String::new();
     let mut failed = 0;
@@ -444,26 +569,42 @@ fn gate(a: &Value) -> Result<String, String> {
         if !ok {
             failed += 1;
         }
-        report.push_str(&format!("{} {name}: {} ({}s)\n", if ok { "PASS" } else { "FAIL" }, argv.join(" "), started.elapsed().as_secs()));
+        report.push_str(&format!(
+            "{} {name}: {} ({}s)\n",
+            if ok { "PASS" } else { "FAIL" },
+            argv.join(" "),
+            started.elapsed().as_secs()
+        ));
         if !ok {
             report.push_str(&cap_lines(&out_str(&out), 15));
             report.push('\n');
         }
     }
-    report.push_str(&format!("\n{} failed / {} steps", failed, steps_len(&failed, &report)));
+    report.push_str(&format!(
+        "\n{} failed / {} steps",
+        failed,
+        steps_len(&failed, &report)
+    ));
     Ok(report)
 }
 
 fn steps_len(failed: &i32, report: &str) -> usize {
     let _ = failed;
-    report.lines().filter(|l| l.starts_with("PASS ") || l.starts_with("FAIL ")).count()
+    report
+        .lines()
+        .filter(|l| l.starts_with("PASS ") || l.starts_with("FAIL "))
+        .count()
 }
 
 // ----------------------------------------------------------------- release
 
 fn release(a: &Value) -> Result<String, String> {
     let project = a["project"].as_str().ok_or("release needs project")?;
-    let version = a["version"].as_str().ok_or("release needs version")?.trim_start_matches('v').to_string();
+    let version = a["version"]
+        .as_str()
+        .ok_or("release needs version")?
+        .trim_start_matches('v')
+        .to_string();
     let deep = a["deep"].as_bool().unwrap_or(false);
     let repo = repo_of(project).ok_or(format!("cannot resolve repo for {project}"))?;
     let mut blockers: Vec<String> = Vec::new();
@@ -476,7 +617,10 @@ fn release(a: &Value) -> Result<String, String> {
         let t = std::fs::read_to_string(&cargo).unwrap_or_default();
         if let Some(v) = toml_version(&t) {
             let ok = v == version;
-            versions.push(format!("Cargo.toml: {v}{}", if ok { "" } else { " (mismatch)" }));
+            versions.push(format!(
+                "Cargo.toml: {v}{}",
+                if ok { "" } else { " (mismatch)" }
+            ));
             if !ok {
                 blockers.push(format!("Cargo.toml version {v} != {version}"));
             }
@@ -506,7 +650,11 @@ fn release(a: &Value) -> Result<String, String> {
 
     // 2. changelog draft
     let last_tag = git(&repo, &["describe", "--tags", "--abbrev=0"]);
-    let range = if last_tag.is_empty() { "HEAD".to_string() } else { format!("{last_tag}..HEAD") };
+    let range = if last_tag.is_empty() {
+        "HEAD".to_string()
+    } else {
+        format!("{last_tag}..HEAD")
+    };
     let log = git(&repo, &["log", "--oneline", &range]);
     let commits: Vec<&str> = log.lines().take(MAX_ITEMS).collect();
     // 3. secrets
@@ -514,7 +662,19 @@ fn release(a: &Value) -> Result<String, String> {
     if let Some(bin) = which("gitleaks") {
         let tmp = std::env::temp_dir().join(format!("ytdev-gl-{}.json", epoch()));
         let cfg = config_dir().join("gitleaks.toml");
-        let mut args = vec!["dir", repo.to_str().unwrap_or("."), "--report-format", "json", "--no-banner", "--exit-code", "0", "--max-target-megabytes", "5", "--report-path", tmp.to_str().unwrap_or("/tmp/gl.json")];
+        let mut args = vec![
+            "dir",
+            repo.to_str().unwrap_or("."),
+            "--report-format",
+            "json",
+            "--no-banner",
+            "--exit-code",
+            "0",
+            "--max-target-megabytes",
+            "5",
+            "--report-path",
+            tmp.to_str().unwrap_or("/tmp/gl.json"),
+        ];
         let cfg_s = cfg.to_str().unwrap_or("").to_string();
         if cfg.is_file() {
             args.extend(["--config", cfg_s.as_str()]);
@@ -523,7 +683,13 @@ fn release(a: &Value) -> Result<String, String> {
         if let Ok(t) = std::fs::read_to_string(&tmp) {
             if let Ok(arr) = serde_json::from_str::<Vec<Value>>(&t) {
                 for h in arr.iter().take(MAX_ITEMS) {
-                    secret_lines.push(format!("[{}] {}:{} {}", h["RuleID"].as_str().unwrap_or("?"), h["File"].as_str().unwrap_or("?"), h["StartLine"].as_i64().unwrap_or(0), redact(h["Match"].as_str().unwrap_or(""))));
+                    secret_lines.push(format!(
+                        "[{}] {}:{} {}",
+                        h["RuleID"].as_str().unwrap_or("?"),
+                        h["File"].as_str().unwrap_or("?"),
+                        h["StartLine"].as_i64().unwrap_or(0),
+                        redact(h["Match"].as_str().unwrap_or(""))
+                    ));
                 }
             }
         }
@@ -538,14 +704,34 @@ fn release(a: &Value) -> Result<String, String> {
         let tmp = std::env::temp_dir().join(format!("ytdev-osv-{}.json", epoch()));
         let tmp_s = tmp.to_string_lossy().into_owned();
         let repo_s = repo.to_string_lossy().into_owned();
-        let args = ["scan", "source", "-r", repo_s.as_str(), "-f", "json", "--output-file", tmp_s.as_str()];
+        let args = [
+            "scan",
+            "source",
+            "-r",
+            repo_s.as_str(),
+            "-f",
+            "json",
+            "--output-file",
+            tmp_s.as_str(),
+        ];
         let _ = run(bin.to_str().unwrap_or("osv-scanner"), &args, None);
         if let Ok(t) = std::fs::read_to_string(&tmp) {
             if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                for r in v["results"].as_array().cloned().unwrap_or_default().iter().take(MAX_ITEMS) {
+                for r in v["results"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .take(MAX_ITEMS)
+                {
                     for p in r["packages"].as_array().cloned().unwrap_or_default() {
                         for vuln in p["vulnerabilities"].as_array().cloned().unwrap_or_default() {
-                            vulns.push(format!("{} {} — {}", p["package"]["name"].as_str().unwrap_or("?"), p["package"]["version"].as_str().unwrap_or("?"), vuln["id"].as_str().unwrap_or("?")));
+                            vulns.push(format!(
+                                "{} {} — {}",
+                                p["package"]["name"].as_str().unwrap_or("?"),
+                                p["package"]["version"].as_str().unwrap_or("?"),
+                                vuln["id"].as_str().unwrap_or("?")
+                            ));
                         }
                     }
                 }
@@ -558,7 +744,11 @@ fn release(a: &Value) -> Result<String, String> {
     if deep && which("cargo-audit").is_some() && repo.join("Cargo.lock").is_file() {
         let o = run("cargo", &["audit", "--quiet"], Some(&repo));
         let text = out_str(&o);
-        for l in text.lines().filter(|l| l.contains("ID:") || l.contains("error")).take(10) {
+        for l in text
+            .lines()
+            .filter(|l| l.contains("ID:") || l.contains("error"))
+            .take(10)
+        {
             vulns.push(format!("cargo-audit: {}", l.trim()));
         }
     }
