@@ -366,6 +366,9 @@ fn gate(a: &Value) -> Result<String, String> {
         ));
     }
     let mut report = String::new();
+    for h in cargo_profile_hints(&repo) {
+        report.push_str(&format!("hint: {h}\n"));
+    }
     let mut failed = 0;
     for (name, argv) in steps {
         let started = std::time::Instant::now();
@@ -401,6 +404,31 @@ fn steps_len(failed: &i32, report: &str) -> usize {
         .lines()
         .filter(|l| l.starts_with("PASS ") || l.starts_with("FAIL "))
         .count()
+}
+
+/// Release-profile settings that silently slow the agent loop down.
+fn cargo_profile_hints(repo: &Path) -> Vec<String> {
+    let Ok(t) = std::fs::read_to_string(repo.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let mut v = Vec::new();
+    let fat_lto = t
+        .lines()
+        .any(|l| matches!(l.trim(), "lto = true" | "lto = \"fat\""));
+    let small_opt = t
+        .lines()
+        .any(|l| matches!(l.trim(), "opt-level = \"z\"" | "opt-level = \"s\""));
+    if fat_lto {
+        v.push(
+            "release 开了 fat LTO：改一行也要全量重链（本机实测 7.8s，关掉 1.2s）。\
+             日常用 cargo check/debug，发版才 --release；或改 lto=\"thin\""
+                .to_string(),
+        );
+    }
+    if small_opt {
+        v.push("opt-level=z/s 是压体积档，运行时比 3 慢（为体积保留则忽略本条）".to_string());
+    }
+    v
 }
 
 // ----------------------------------------------------------------- release
@@ -593,4 +621,29 @@ fn release(a: &Value) -> Result<String, String> {
     }
     s.push_str(&format!("\n将执行（未执行）:\n  git tag -a {tag} -m \"{project} {version}\"\n  git push origin {tag}\n"));
     Ok(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_hints_flag_fat_lto_and_opt_z() {
+        let dir = std::env::temp_dir().join("yt-dev-profile-hint-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[profile.release]\nopt-level = \"z\"\nlto = true\n",
+        )
+        .unwrap();
+        assert_eq!(cargo_profile_hints(&dir).len(), 2);
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[profile.release]\nopt-level = 3\nlto = \"thin\"\n",
+        )
+        .unwrap();
+        assert!(cargo_profile_hints(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

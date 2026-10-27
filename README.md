@@ -79,6 +79,17 @@ keep_runs = 30        # 无论占用多少，最多保留这么多个 run（运�
 ## 下一步
 ```
 
+## 语言与编译约定
+
+worker prompt 里带这两条硬约束（`worker-prompt.md` 覆盖时记得保留）：
+
+- 新项目默认 Rust；已有源码的仓库沿用原语言，除非计划里明确写了重构/迁移。换语言不由 worker 决定，写进收尾说明交 YT。
+- Rust 日常验证用 `cargo check` / debug `cargo build`，`--release` 收尾验一次；release 用 `opt-level = 3` + `lto = "thin"`，fat LTO 只留给 CI 发版。
+
+`dev_gate` 会读仓库的 `Cargo.toml`，发现 fat LTO 或 `opt-level = "z"/"s"` 时在报告顶部打 `hint:`（本仓实测：fat LTO 每次改行重链 7.8s，关掉 1.2s）。
+
+本机全局加速（不是本仓必需）：`sccache` 作 `rustc-wrapper`、`mold` 作链接器，写进 `~/.cargo/config.toml`。坑：sccache 守护进程在 `$TMPDIR` 下建临时文件，而 agent 会话的 TMPDIR 每轮会变，直接用 `sccache` 会出现 `Failed to create temp dir` 让编译失败；用固定 TMPDIR 的包装脚本（`~/.local/bin/sccache-wrap`）。
+
 ## 依赖
 
 外部二进制，缺了报错并给安装命令，不自动下载：`gitleaks`（隐私扫描）、`osv-scanner`（依赖漏洞）、`cargo`、`codex`、`git`，`dev_publish` 另需 `gh`。`dev_release` 的 `deep` 模式可选 `cargo-audit`。

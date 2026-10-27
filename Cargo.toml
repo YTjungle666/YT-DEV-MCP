@@ -12,6 +12,6 @@ toml = "0.8"
 regex = "1"
 
 [profile.release]
-opt-level = "z"
-lto = true
+opt-level = 3
+lto = "thin"
 strip = true
