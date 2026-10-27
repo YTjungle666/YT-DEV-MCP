@@ -4,18 +4,18 @@
 use crate::plan;
 use crate::tools::repo_of;
 use crate::util::{
-    all_runs, cap1, cap_lines, config_dir, epoch, free_bytes, git, home, out_str, pid_alive,
-    proc_stats, run, runs_dir, which,
+    all_runs, cap1, cap_lines, config_dir, config_limits, dir_bytes, epoch, git, home, out_str,
+    pid_alive, proc_stats, run, runs_dir, which,
 };
 use serde_json::{json, Value};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 const DEFAULT_MEM_MB: u64 = 4096;
 const DEFAULT_CPU_PCT: u32 = 50;
 const MAX_PARALLEL: usize = 6;
-const MIN_FREE_GB: u64 = 5;
+const MB: u64 = 1024 * 1024;
 
 pub fn run_action(a: &Value) -> Result<String, String> {
     match a["action"].as_str().unwrap_or("") {
@@ -79,12 +79,21 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
             repo_of(project).ok_or("cannot resolve repo (add ~/.config/yt-dev/projects.toml)")?
         }
     };
-    if free_bytes(&repo) < MIN_FREE_GB * 1024 * 1024 * 1024 {
+    // Everything this tool writes (run logs, run meta, worktrees) lives under a
+    // user-settable cap; prune before growing, never rely on free disk.
+    let (max_store_mb, keep_runs) = config_limits();
+    let max_store_mb = a["max_store_mb"].as_u64().unwrap_or(max_store_mb);
+    let (before, after, pruned) = prune_store(max_store_mb, keep_runs);
+    if after > max_store_mb * MB {
         return Err(format!(
-            "disk guard: <{MIN_FREE_GB}GB free on {}",
-            repo.display()
+            "store cap {} MB exceeded even after pruning {} old run(s): {} MB in use. 清理 {} 或调大 [limits] max_store_mb",
+            max_store_mb,
+            pruned.len(),
+            after / MB,
+            home().join(".cache/yt-dev/wt").display()
         ));
     }
+    let _ = git(&repo, &["worktree", "prune"]);
     let mem_mb = a["mem_mb"].as_u64().unwrap_or(DEFAULT_MEM_MB);
     let cpu_pct = a["cpu_pct"].as_u64().unwrap_or(DEFAULT_CPU_PCT as u64) as u32;
     let want_wt = a["worktree"].as_bool().unwrap_or(false) || a["action"] == json!("start_batch");
@@ -169,7 +178,7 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(format!(
-        "started {id} pid {} mem {mem_mb}MB cpu {cpu_pct}%{}\n  cwd {}\n  log {}",
+        "started {id} pid {} mem {mem_mb}MB cpu {cpu_pct}%{}\n  cwd {}\n  log {}\n  store {}MB → {}MB / cap {}MB{}",
         s.pid,
         if s.branch.is_empty() {
             String::new()
@@ -177,7 +186,15 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
             format!("\n  branch {}", s.branch)
         },
         s.cwd.display(),
-        log_path.display()
+        log_path.display(),
+        before / MB,
+        after / MB,
+        max_store_mb,
+        if pruned.is_empty() {
+            String::new()
+        } else {
+            format!(" (pruned {})", pruned.join(", "))
+        }
     ))
 }
 
@@ -216,6 +233,100 @@ fn capped_command(mem_mb: u64, cpu_pct: u32) -> Result<Command, String> {
     Ok(c)
 }
 
+/// Everything this tool owns on disk: per-project runs/ dirs plus worktrees.
+fn store_roots() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(crate::util::plan_root()) {
+        for d in rd.filter_map(|e| e.ok()) {
+            let r = d.path().join("runs");
+            if r.is_dir() {
+                v.push(r);
+            }
+        }
+    }
+    let wt = home().join(".cache/yt-dev/wt");
+    if wt.is_dir() {
+        v.push(wt);
+    }
+    v
+}
+
+fn store_bytes() -> u64 {
+    store_roots().iter().map(|p| dir_bytes(p)).sum()
+}
+
+fn remove_run_files(id: &str, m: &Value, removed: &mut Vec<String>) -> u64 {
+    let dir = runs_dir(m["project"].as_str().unwrap_or(""));
+    let mut freed = 0;
+    for name in [format!("{id}.log"), format!("{id}.json")] {
+        let p = dir.join(name);
+        let b = std::fs::metadata(&p).map(|x| x.len()).unwrap_or(0);
+        if std::fs::remove_file(&p).is_ok() {
+            freed += b;
+        }
+    }
+    if freed > 0 {
+        removed.push(format!("run:{id}"));
+    }
+    freed
+}
+
+/// Keep the newest `keep_runs` runs, then drop oldest finished runs and stale
+/// worktrees until the total footprint fits `cap_mb`. Live runs are never cut.
+fn prune_store(cap_mb: u64, keep_runs: usize) -> (u64, u64, Vec<String>) {
+    let cap = cap_mb * MB;
+    let mut total = store_bytes();
+    let before = total;
+    let mut removed = Vec::new();
+
+    let mut kept = 0usize;
+    for (id, m) in all_runs() {
+        kept += 1;
+        if pid_alive(m["pid"].as_i64().unwrap_or(0)) {
+            continue;
+        }
+        if kept > keep_runs {
+            total = total.saturating_sub(remove_run_files(&id, &m, &mut removed));
+        }
+    }
+
+    if total > cap {
+        let mut oldest = all_runs();
+        oldest.reverse();
+        for (id, m) in oldest {
+            if total <= cap {
+                break;
+            }
+            if pid_alive(m["pid"].as_i64().unwrap_or(0)) {
+                continue;
+            }
+            total = total.saturating_sub(remove_run_files(&id, &m, &mut removed));
+        }
+    }
+
+    if total > cap {
+        let wtdir = home().join(".cache/yt-dev/wt");
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(&wtdir)
+            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        dirs.sort();
+        for d in dirs {
+            if total <= cap {
+                break;
+            }
+            let b = dir_bytes(&d);
+            if std::fs::remove_dir_all(&d).is_ok() {
+                total = total.saturating_sub(b);
+                removed.push(format!(
+                    "wt:{}",
+                    d.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+        }
+    }
+    (before, total, removed)
+}
+
 fn status(a: &Value) -> Result<String, String> {
     let want = a["run_id"]
         .as_str()
@@ -247,12 +358,13 @@ fn status(a: &Value) -> Result<String, String> {
     let children = if alive { git_children(pid) } else { 0 };
     let stalled = alive && idle.unwrap_or(0) > 300 && children == 0;
     let disk = out_str(&run("du", &["-sh", cwd.to_str().unwrap_or(".")], None));
+    let (cap_mb, _) = config_limits();
     let tail = std::fs::read_to_string(&log)
         .map(|t| cap_lines(&t, 30))
         .unwrap_or_default();
     Ok(format!(
         "run {id} | {} | pid {pid} alive={alive} | {}s | cpu {cpu:.1}% rss {rss}MB | log idle {}s | children {children}{}\n\
-         disk {} | mem_cap {}MB | cpu_cap {}%{}\n\n== diffstat\n{}\n\n== log tail\n{}",
+         disk {} | mem_cap {}MB | cpu_cap {}%{}\nstore {}MB / cap {}MB\n\n== diffstat\n{}\n\n== log tail\n{}",
         if alive { "running" } else { "finished" },
         epoch() - m["started"].as_i64().unwrap_or(0),
         idle.unwrap_or(-1),
@@ -261,6 +373,8 @@ fn status(a: &Value) -> Result<String, String> {
         m["mem_mb"].as_u64().unwrap_or(0),
         m["cpu_pct"].as_u64().unwrap_or(0),
         m["branch"].as_str().map(|b| format!("\nbranch {b}")).unwrap_or_default(),
+        store_bytes() / MB,
+        cap_mb,
         if changes.trim().is_empty() { "(none)" } else { changes.as_str() },
         tail
     ))
@@ -351,5 +465,31 @@ fn build_prompt(
 
 const DEFAULT_PROMPT: &str = "项目：{project}\n完整计划：{plan_path}（只在需要查证时读，不要通读全篇）\n\n你只负责这一部分：{scope}\n\n计划片段（决策已定，不要重新讨论方案）：\n{slice}\n\n任务：{task}\n\n硬约束：\n1. 只执行，不提问；歧义按片段里的决策取舍。范围外的文件一律不碰，确需改动先写进最后的说明里而不是直接改。\n2. 模块化：一个文件一个职责；新逻辑放独立模块，不往大文件里继续堆；单文件超过 400 行或函数超过 60 行就拆。\n3. 资源上限：本进程 MemoryMax={mem_mb}M、CPUQuota={cpu_pct}%；不要起常驻进程，不要跑全量基准，不要下载大文件。\n4. 性能优先：先看复杂度，避免 O(n²) 和每请求分配；复用仓库已有实现，不新造轮子；性能与可读性冲突时选性能，并注释说明。\n5. 不 push、不打 tag、不改 PLAN.md。\n6. 结束用一句话说明改了什么、没做什么。\n";
 
-#[allow(dead_code)]
-fn _unused(_: &Path) {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_drops_oldest_runs_until_under_cap() {
+        let tmp = std::env::temp_dir().join("yt-dev-prune-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let runs = tmp.join("Plan/p/runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        std::env::set_var("HOME", &tmp);
+        for i in 0..3 {
+            let id = format!("100{i}-000000");
+            std::fs::write(
+                runs.join(format!("{id}.json")),
+                json!({"id": id, "project": "p", "pid": 0, "started": 1000 + i, "status": "finished"}).to_string(),
+            )
+            .unwrap();
+            std::fs::write(runs.join(format!("{id}.log")), "x".repeat(400_000)).unwrap();
+        }
+        let (before, after, removed) = prune_store(1, 30);
+        assert!(before > MB, "before={before}");
+        assert!(after <= MB, "after={after}");
+        assert!(!removed.is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::remove_var("HOME");
+    }
+}

@@ -18,7 +18,8 @@
 关键约束（写死在工具里，不是提示词）：
 
 - 一个 worker 只拿计划的一个切片（`scope`，硬截断 4 KB），并行用 `start_batch`（上限 6），每个 worker 独立 `git worktree` + `yt-dev/<id>` 分支。
-- CPU/内存有硬上限：`systemd-run --user --scope` 的 `MemoryMax` / `CPUQuota`，实测落在 cgroup 里；启动前磁盘余量不足 5 GB 直接拒绝。
+- CPU/内存有硬上限：`systemd-run --user --scope` 的 `MemoryMax` / `CPUQuota`，实测落在 cgroup 里。
+- 磁盘有产物上限（不是看剩余空间）：run 日志/元数据 + worktree 的总占用受 `[limits] max_store_mb` 约束（默认 4096 MB，可按次覆盖），触顶时先按 `keep_runs` 保留最近若干 run，再删最旧的已结束 run，最后删其遗留 worktree；运行中的 worker 永不删。
 - `kill` 只在显式调用时执行：先 SIGTERM 进程组，10 秒后 SIGKILL。
 - 扫描命中一律脱敏输出（前 4 字符 + 长度），密钥原文不进报告。
 - `dev_publish` 默认 dry-run，license / README / 密钥任一不过就不推送。
@@ -52,10 +53,19 @@ mcp_servers:
 
 ```
 ~/.config/yt-dev/
+  config.toml        # [limits] max_store_mb / keep_runs —— 产物占用上限
   gitleaks.toml      # 私有规则：家目录绝对路径 / 10.10.10.* / token 前缀 + allowlist
   projects.toml      # project → repo 路径显式映射（覆盖 PLAN.md 声明与同名目录启发式）
   worker-prompt.md   # worker prompt 模板（{project} {task} {scope} {slice} {plan_path} {mem_mb} {cpu_pct}）
 ~/Plan/<project>/runs/<id>.{json,log}   # run 元数据与 codex 原始输出
+```
+
+`config.toml` 的 `[limits]`：
+
+```toml
+[limits]
+max_store_mb = 4096   # run 日志/元数据 + worktree 的总占用上限，可按次用 max_store_mb 覆盖
+keep_runs = 30        # 无论占用多少，最多保留这么多个 run（运行中的不删）
 ```
 
 计划文档形状（`dev_plan` / `dev_worker` 依赖它）：

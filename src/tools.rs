@@ -51,7 +51,8 @@ pub fn schemas() -> Value {
                 "run_id": {"type": "string"},
                 "worktree": {"type": "boolean", "description": "用独立 git worktree 隔离（start_batch 强制开启）"},
                 "mem_mb": {"type": "integer", "default": 4096, "description": "MemoryMax（硬上限）"},
-                "cpu_pct": {"type": "integer", "default": 50, "description": "CPUQuota 百分比（硬上限）"}
+                "cpu_pct": {"type": "integer", "default": 50, "description": "CPUQuota 百分比（硬上限）"},
+                "max_store_mb": {"type": "integer", "description": "本次允许的产物占用上限（run 日志/元数据 + worktree），缺省取 ~/.config/yt-dev/config.toml 的 [limits] max_store_mb（默认 4096）"}
             }, "required": ["action"]}
         },
         {

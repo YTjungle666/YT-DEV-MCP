@@ -208,13 +208,34 @@ pub fn proc_stats(pid: i64) -> (f64, u64) {
     (cpu, rss_kb / 1024)
 }
 
-/// Free bytes on the filesystem holding `p`.
-pub fn free_bytes(p: &Path) -> u64 {
-    let o = run("df", &["-P", "-B1", p.to_str().unwrap_or(".")], None);
+/// Apparent size of a path in bytes; 0 when it does not exist.
+pub fn dir_bytes(p: &Path) -> u64 {
+    if !p.exists() {
+        return 0;
+    }
+    let o = run("du", &["-sb", p.to_str().unwrap_or(".")], None);
     out_str(&o)
-        .lines()
-        .nth(1)
-        .and_then(|l| l.split_whitespace().nth(3))
-        .and_then(|v| v.parse::<u64>().ok())
+        .split_whitespace()
+        .next()
+        .and_then(|v| v.parse().ok())
         .unwrap_or(0)
+}
+
+/// `[limits]` from ~/.config/yt-dev/config.toml → (max_store_mb, keep_runs).
+pub fn config_limits() -> (u64, usize) {
+    let mut max_store_mb = 4096;
+    let mut keep_runs = 30;
+    if let Ok(t) = std::fs::read_to_string(config_dir().join("config.toml")) {
+        if let Ok(v) = t.parse::<toml::Value>() {
+            if let Some(l) = v.get("limits") {
+                if let Some(x) = l.get("max_store_mb").and_then(|x| x.as_integer()) {
+                    max_store_mb = x.max(0) as u64;
+                }
+                if let Some(x) = l.get("keep_runs").and_then(|x| x.as_integer()) {
+                    keep_runs = x.max(1) as usize;
+                }
+            }
+        }
+    }
+    (max_store_mb, keep_runs)
 }
