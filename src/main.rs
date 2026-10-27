@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
 mod plan;
+mod publish;
 mod tools;
 mod util;
 mod worker;
@@ -33,7 +34,7 @@ fn main() {
             "initialize" => Ok(json!({
                 "protocolVersion": params.get("protocolVersion").and_then(|v| v.as_str()).unwrap_or("2024-11-05"),
                 "capabilities": {"tools": {"listChanged": false}},
-                "serverInfo": {"name": "ytdev", "version": env!("CARGO_PKG_VERSION")}
+                "serverInfo": {"name": "yt-dev", "version": env!("CARGO_PKG_VERSION")}
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({"tools": tools::schemas()})),

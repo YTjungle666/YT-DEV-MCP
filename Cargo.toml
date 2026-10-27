@@ -1,5 +1,5 @@
 [package]
-name = "ytdev-mcp"
+name = "yt-dev-mcp"
 version = "0.1.0"
 edition = "2021"
 description = "Personal code-workflow MCP server (plans, codex workers, review/gate, release scans)"

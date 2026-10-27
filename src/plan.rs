@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn slice_keeps_decisions_and_only_the_named_phase() {
         let text = "# t\n\n状态：v1\n\n## 分阶段实施\n\n### P0 骨架\n- [ ] 甲\n\n### P1 接口\n- [ ] 乙\n\n## 硬约束\n- 不许动数据库\n";
-        let tmp = std::env::temp_dir().join("ytdev-slice-test.md");
+        let tmp = std::env::temp_dir().join("yt-dev-slice-test.md");
         std::fs::write(&tmp, text).unwrap();
         // slice() reads from ~/Plan, so exercise the block helpers directly.
         let lines: Vec<&str> = text.lines().collect();

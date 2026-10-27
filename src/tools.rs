@@ -81,6 +81,18 @@ pub fn schemas() -> Value {
                 "deep": {"type": "boolean", "default": false, "description": "追加 cargo audit"},
                 "dry_run": {"type": "boolean", "default": true}
             }, "required": ["project", "version"]}
+        },
+        {
+            "name": "dev_publish",
+            "description": "上传 GitHub 并加保护规则。先校验：未提交改动、README 长度、LICENSE（默认 PolyForm Noncommercial 1.0.0；派生自上游必须与上游同 license）、gitleaks 密钥扫描；通过后才 gh repo create/push，并给 main 加保护（禁强推/禁删除、要求 ci 通过）。默认 dry-run。",
+            "inputSchema": {"type": "object", "properties": {
+                "project": {"type": "string"},
+                "repo": {"type": "string", "description": "owner/name，缺省用 origin remote 或 gh 用户名 + 目录名"},
+                "visibility": {"type": "string", "enum": ["public", "private"], "default": "public"},
+                "license": {"type": "string", "description": "缺省 PolyForm-Noncommercial-1.0.0"},
+                "upstream": {"type": "string", "description": "派生来源 owner/name：自动对齐其 license"},
+                "dry_run": {"type": "boolean", "default": true}
+            }, "required": ["project"]}
         }
     ])
 }
@@ -99,6 +111,7 @@ pub fn call(params: &Value) -> Result<Value, (i32, String)> {
         "dev_review" => review(&a),
         "dev_gate" => gate(&a),
         "dev_release" => release(&a),
+        "dev_publish" => crate::publish::run_publish(&a),
         other => Err(format!("unknown tool {other}")),
     };
     Ok(match out {
@@ -263,7 +276,7 @@ fn review(a: &Value) -> Result<String, String> {
          没有问题时 findings 为空数组。不要修改任何文件。"
     );
     let mut cmd = Command::new(which("codex").ok_or("codex not on PATH")?);
-    let out_file = std::env::temp_dir().join(format!("ytdev-review-{}.json", epoch()));
+    let out_file = std::env::temp_dir().join(format!("yt-dev-review-{}.json", epoch()));
     let out_s = out_file.to_string_lossy().into_owned();
     cmd.args([
         "exec",
@@ -453,7 +466,7 @@ fn release(a: &Value) -> Result<String, String> {
     // 3. secrets
     let mut secret_lines = Vec::new();
     if let Some(bin) = which("gitleaks") {
-        let tmp = std::env::temp_dir().join(format!("ytdev-gl-{}.json", epoch()));
+        let tmp = std::env::temp_dir().join(format!("yt-dev-gl-{}.json", epoch()));
         let cfg = config_dir().join("gitleaks.toml");
         let mut args = vec![
             "dir",
@@ -494,7 +507,7 @@ fn release(a: &Value) -> Result<String, String> {
     // 4. vulnerabilities
     let mut vulns = Vec::new();
     if let Some(bin) = which("osv-scanner") {
-        let tmp = std::env::temp_dir().join(format!("ytdev-osv-{}.json", epoch()));
+        let tmp = std::env::temp_dir().join(format!("yt-dev-osv-{}.json", epoch()));
         let tmp_s = tmp.to_string_lossy().into_owned();
         let repo_s = repo.to_string_lossy().into_owned();
         let args = [

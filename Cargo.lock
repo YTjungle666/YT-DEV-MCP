@@ -212,7 +212,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ytdev-mcp"
+name = "yt-dev-mcp"
 version = "0.1.0"
 dependencies = [
  "regex",

@@ -76,7 +76,7 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
     let repo = match a["cwd"].as_str() {
         Some(c) => PathBuf::from(c),
         None => {
-            repo_of(project).ok_or("cannot resolve repo (add ~/.config/ytdev/projects.toml)")?
+            repo_of(project).ok_or("cannot resolve repo (add ~/.config/yt-dev/projects.toml)")?
         }
     };
     if free_bytes(&repo) < MIN_FREE_GB * 1024 * 1024 * 1024 {
@@ -95,8 +95,8 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
 
     // Parallel workers must not share a working tree.
     let (cwd, branch) = if want_wt && repo.join(".git").exists() {
-        let wt = home().join(".cache/ytdev/wt").join(&id);
-        let br = format!("ytdev/{id}");
+        let wt = home().join(".cache/yt-dev/wt").join(&id);
+        let br = format!("yt-dev/{id}");
         if let Some(p) = wt.parent() {
             std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }

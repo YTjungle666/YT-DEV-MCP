@@ -12,7 +12,7 @@ pub fn plan_root() -> PathBuf {
 }
 
 pub fn config_dir() -> PathBuf {
-    home().join(".config/ytdev")
+    home().join(".config/yt-dev")
 }
 
 pub fn epoch() -> i64 {
@@ -88,6 +88,7 @@ pub fn selftest() -> i32 {
         ("cargo", "rustup/apt: install cargo"),
         ("codex", "npm install -g @openai/codex"),
         ("git", "apt install git"),
+        ("gh", "apt install gh"),
     ];
     let mut bad = 0;
     for (b, hint) in checks {
