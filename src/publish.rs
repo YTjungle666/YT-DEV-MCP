@@ -311,10 +311,13 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
 
 /// SPDX ids and license titles differ in punctuation; compare letters+digits only.
 fn normalized(s: &str) -> String {
+    // SPDX ids and license titles differ in punctuation and in the word "license"
+    // ("PolyForm-Noncommercial-1.0.0" vs "PolyForm Noncommercial License 1.0.0").
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .collect::<String>()
         .to_lowercase()
+        .replace("license", "")
 }
 
 fn decode_b64(s: &str) -> Option<String> {
