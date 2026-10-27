@@ -54,7 +54,7 @@ mcp_servers:
 ```
 ~/.config/yt-dev/
   config.toml        # [limits] max_store_mb / keep_runs —— 产物占用上限
-  gitleaks.toml      # 私有规则：家目录绝对路径 / 10.10.10.* / token 前缀 + allowlist
+  gitleaks.toml      # 私有规则：家目录绝对路径 / 本地内网地址 / token 前缀 + allowlist
   projects.toml      # project → repo 路径显式映射（覆盖 PLAN.md 声明与同名目录启发式）
   worker-prompt.md   # worker prompt 模板（{project} {task} {scope} {slice} {plan_path} {mem_mb} {cpu_pct}）
 ~/Plan/<project>/runs/<id>.{json,log}   # run 元数据与 codex 原始输出
