@@ -22,6 +22,16 @@ pub fn epoch() -> i64 {
         .unwrap_or(0)
 }
 
+/// Unique run id: seconds plus sub-second nanos (two workers can start in the
+/// same second and would otherwise collide on branch names).
+pub fn stamp() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() % 1_000_000)
+        .unwrap_or(0);
+    format!("{}-{nanos:06}", epoch())
+}
+
 pub fn age_secs(t: SystemTime) -> i64 {
     t.elapsed().map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -134,4 +144,76 @@ pub fn repo_from_plan(text: &str) -> Option<String> {
 pub fn git(dir: &Path, args: &[&str]) -> String {
     let o = run("git", args, Some(dir));
     out_str(&o).trim().to_string()
+}
+
+// ------------------------------------------------------------ workflows
+
+pub fn runs_dir(project: &str) -> PathBuf {
+    plan_root().join(project).join("runs")
+}
+
+/// All run records, newest first.
+pub fn all_runs() -> Vec<(String, serde_json::Value)> {
+    let mut out = Vec::new();
+    let Ok(dirs) = std::fs::read_dir(plan_root()) else {
+        return out;
+    };
+    for d in dirs.filter_map(|e| e.ok()) {
+        let rd = d.path().join("runs");
+        let Ok(files) = std::fs::read_dir(&rd) else {
+            continue;
+        };
+        for f in files.filter_map(|e| e.ok()) {
+            let path = f.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            if let Ok(t) = std::fs::read_to_string(&path) {
+                if let Ok(v) = serde_json::from_str(&t) {
+                    let id = path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    out.push((id, v));
+                }
+            }
+        }
+    }
+    out.sort_by_key(|(_, v)| -v["started"].as_i64().unwrap_or(0));
+    out
+}
+
+pub fn pid_alive(pid: i64) -> bool {
+    pid > 0 && Path::new(&format!("/proc/{pid}")).exists()
+}
+
+pub fn cap1(s: &str, n: usize) -> String {
+    let t: String = s.chars().take(n).collect();
+    if s.chars().count() > n {
+        format!("{t}…")
+    } else {
+        t
+    }
+}
+
+/// CPU% and RSS(MB) of a pid, read from ps so no /proc parsing is needed.
+pub fn proc_stats(pid: i64) -> (f64, u64) {
+    let o = run("ps", &["-o", "%cpu=,rss=", "-p", &pid.to_string()], None);
+    let s = out_str(&o);
+    let mut it = s.split_whitespace();
+    let cpu = it.next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    let rss_kb = it.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    (cpu, rss_kb / 1024)
+}
+
+/// Free bytes on the filesystem holding `p`.
+pub fn free_bytes(p: &Path) -> u64 {
+    let o = run("df", &["-P", "-B1", p.to_str().unwrap_or(".")], None);
+    out_str(&o)
+        .lines()
+        .nth(1)
+        .and_then(|l| l.split_whitespace().nth(3))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
 }

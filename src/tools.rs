@@ -2,11 +2,8 @@
 //! by a model: counts + top items, never unbounded dumps.
 
 use crate::plan;
-use crate::util::{
-    cap_lines, config_dir, epoch, git, home, out_str, plan_root, redact, run, which,
-};
+use crate::util::{all_runs, cap_lines, config_dir, epoch, git, home, out_str, redact, run, which};
 use serde_json::{json, Value};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -41,13 +38,20 @@ pub fn schemas() -> Value {
         },
         {
             "name": "dev_worker",
-            "description": "codex worker 生命周期。start 会真的后台起 codex exec（有副作用）；kill 只在显式调用时执行（TERM→10s→KILL）。",
+            "description": "codex worker 生命周期。一个 worker 只给计划的一个切片（scope），并行任务用 start_batch 各起独立 worktree；CPU/内存有硬上限，kill 只在显式调用时执行。",
             "inputSchema": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["start", "status", "list", "kill"]},
+                "action": {"type": "string", "enum": ["start", "start_batch", "status", "list", "kill"]},
                 "project": {"type": "string"},
-                "task": {"type": "string"},
-                "cwd": {"type": "string", "description": "覆盖仓库路径"},
-                "run_id": {"type": "string"}
+                "task": {"type": "string", "description": "这一个 worker 要做的事，越具体越好"},
+                "scope": {"type": "array", "items": {"type": "string"}, "description": "该 worker 负责的计划段落关键字（阶段标题），只把这部分拼进 prompt"},
+                "tasks": {"type": "array", "items": {"type": "object", "properties": {
+                    "name": {"type": "string"}, "task": {"type": "string"}, "scope": {"type": "array", "items": {"type": "string"}}
+                }, "required": ["task"]}, "description": "start_batch 用：并行任务列表（上限 6）"},
+                "cwd": {"type": "string"},
+                "run_id": {"type": "string"},
+                "worktree": {"type": "boolean", "description": "用独立 git worktree 隔离（start_batch 强制开启）"},
+                "mem_mb": {"type": "integer", "default": 4096, "description": "MemoryMax（硬上限）"},
+                "cpu_pct": {"type": "integer", "default": 50, "description": "CPUQuota 百分比（硬上限）"}
             }, "required": ["action"]}
         },
         {
@@ -91,7 +95,7 @@ pub fn call(params: &Value) -> Result<Value, (i32, String)> {
             a["project"].as_str().unwrap_or(""),
             a["ops"].as_array().cloned().unwrap_or_default().as_slice(),
         ),
-        "dev_worker" => worker(&a),
+        "dev_worker" => crate::worker::run_action(&a),
         "dev_review" => review(&a),
         "dev_gate" => gate(&a),
         "dev_release" => release(&a),
@@ -107,7 +111,7 @@ pub fn call(params: &Value) -> Result<Value, (i32, String)> {
 
 // ---------------------------------------------------------------- projects
 
-fn repo_of(project: &str) -> Option<PathBuf> {
+pub(crate) fn repo_of(project: &str) -> Option<PathBuf> {
     // Explicit mapping first, then whatever the plan declares, then ~/<name>.
     let cfg = config_dir().join("projects.toml");
     if let Ok(t) = std::fs::read_to_string(&cfg) {
@@ -136,7 +140,7 @@ fn projects() -> Result<String, String> {
     let mut rows = Vec::new();
     let mut unknown = Vec::new();
     let mut active: Vec<(String, String)> = Vec::new();
-    for (id, meta) in runs() {
+    for (id, meta) in all_runs() {
         if meta["status"] == json!("running") {
             active.push((id, meta["project"].as_str().unwrap_or("-").to_string()));
         }
@@ -203,198 +207,6 @@ fn projects() -> Result<String, String> {
     Ok(s)
 }
 
-// ------------------------------------------------------------------ worker
-
-fn runs_dir(project: &str) -> PathBuf {
-    plan_root().join(project).join("runs")
-}
-
-fn runs() -> Vec<(String, Value)> {
-    let mut out = Vec::new();
-    for p in plan::list_projects() {
-        let dir = runs_dir(&p);
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for e in rd.filter_map(|e| e.ok()) {
-            let path = e.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("json") {
-                continue;
-            }
-            if let Ok(t) = std::fs::read_to_string(&path) {
-                if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                    let id = path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    out.push((id, v));
-                }
-            }
-        }
-    }
-    out.sort_by_key(|(_, v)| -v["started"].as_i64().unwrap_or(0));
-    out
-}
-
-fn pid_alive(pid: i64) -> bool {
-    pid > 0 && Path::new(&format!("/proc/{pid}")).exists()
-}
-
-fn worker(a: &Value) -> Result<String, String> {
-    match a["action"].as_str().unwrap_or("") {
-        "start" => {
-            let project = a["project"].as_str().unwrap_or("");
-            let task = a["task"].as_str().ok_or("start needs task")?;
-            let repo = a["cwd"]
-                .as_str()
-                .map(PathBuf::from)
-                .or_else(|| repo_of(project))
-                .ok_or("cannot resolve repo (add ~/.config/ytdev/projects.toml)")?;
-            let plan_path = plan::plan_path(project)
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| {
-                    plan_root()
-                        .join(project)
-                        .join("PLAN.md")
-                        .display()
-                        .to_string()
-                });
-            let prompt = build_prompt(&plan_path, project, task);
-            let dir = runs_dir(project);
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            let id = format!("{}-{:06}", epoch(), epoch() % 1_000_000);
-            let log_path = dir.join(format!("{id}.log"));
-            let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
-            let base = git(&repo, &["rev-parse", "HEAD"]);
-            let mut cmd = Command::new(which("codex").ok_or("codex not on PATH")?);
-            cmd.args([
-                "exec",
-                "--dangerously-bypass-approvals-and-sandbox",
-                &prompt,
-            ])
-            .current_dir(&repo)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
-            .stderr(Stdio::from(log));
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc_setsid();
-                    Ok(())
-                });
-            }
-            let child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
-            let meta = json!({
-                "id": id, "project": project, "task": task, "cwd": repo.display().to_string(),
-                "base_commit": base, "pid": child.id(), "started": epoch(), "status": "running",
-                "log": log_path.display().to_string()
-            });
-            std::fs::write(
-                dir.join(format!("{id}.json")),
-                serde_json::to_string_pretty(&meta).unwrap(),
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(format!(
-                "started {id}\npid {}\nlog {}\ncwd {}",
-                child.id(),
-                log_path.display(),
-                repo.display()
-            ))
-        }
-        "status" => {
-            let want = a["run_id"]
-                .as_str()
-                .or(a["project"].as_str())
-                .ok_or("status needs run_id or project")?;
-            let Some((id, meta)) = runs()
-                .into_iter()
-                .find(|(id, m)| id == want || m["project"] == json!(want))
-            else {
-                return Err(format!("no run {want}"));
-            };
-            let pid = meta["pid"].as_i64().unwrap_or(0);
-            let alive = pid_alive(pid);
-            let log = PathBuf::from(meta["log"].as_str().unwrap_or(""));
-            let tail = std::fs::read_to_string(&log)
-                .map(|t| cap_lines(&t, 40))
-                .unwrap_or_default();
-            let log_age = std::fs::metadata(&log)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(crate::util::age_secs);
-            let repo = PathBuf::from(meta["cwd"].as_str().unwrap_or("."));
-            let base = meta["base_commit"].as_str().unwrap_or("HEAD");
-            let diffstat = git(&repo, &["diff", "--stat", base]);
-            let children = if alive { git_children(pid) } else { 0 };
-            let stalled = alive && log_age.unwrap_or(0) > 300 && children == 0;
-            Ok(format!(
-                "run {id} | {} | pid {pid} alive={alive} | started {}s ago | log idle {}s | build children {children}{}\n\n== diffstat\n{}\n\n== log tail\n{}",
-                if alive { "running" } else { "finished" },
-                epoch() - meta["started"].as_i64().unwrap_or(0),
-                log_age.unwrap_or(-1),
-                if stalled { " | STALLED(no output, no build child)" } else { "" },
-                if diffstat.is_empty() { "(none)" } else { diffstat.as_str() },
-                tail
-            ))
-        }
-        "list" => {
-            let all = runs();
-            if all.is_empty() {
-                return Ok("no runs".into());
-            }
-            let mut s = String::new();
-            for (id, m) in all.iter().take(MAX_ITEMS) {
-                let alive = pid_alive(m["pid"].as_i64().unwrap_or(0));
-                s.push_str(&format!(
-                    "{id} | {} | pid {} alive={alive} | {}\n",
-                    m["project"].as_str().unwrap_or("-"),
-                    m["pid"].as_i64().unwrap_or(0),
-                    cap1(m["task"].as_str().unwrap_or(""), 60)
-                ));
-            }
-            Ok(s)
-        }
-        "kill" => {
-            let id = a["run_id"]
-                .as_str()
-                .ok_or("kill needs run_id (explicit, by id)")?;
-            let Some((_, meta)) = runs().into_iter().find(|(rid, _)| rid == id) else {
-                return Err(format!("no run {id}"));
-            };
-            let pid = meta["pid"].as_i64().unwrap_or(0);
-            if !pid_alive(pid) {
-                return Ok(format!("run {id}: pid {pid} already gone"));
-            }
-            let _ = run("kill", &["-TERM", &pid.to_string()], None);
-            for _ in 0..20 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                if !pid_alive(pid) {
-                    return Ok(format!("run {id}: terminated (SIGTERM)"));
-                }
-            }
-            let _ = run("kill", &["-KILL", &pid.to_string()], None);
-            Ok(format!(
-                "run {id}: killed (SIGTERM ignored 10s, sent SIGKILL)"
-            ))
-        }
-        other => Err(format!("unknown action {other}")),
-    }
-}
-
-unsafe fn libc_setsid() {
-    // Avoid a libc dependency: setsid(2) is syscall 112 on x86_64/aarch64 Linux.
-    extern "C" {
-        fn setsid() -> i32;
-    }
-    setsid();
-}
-
-fn git_children(pid: i64) -> usize {
-    std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
-        .map(|s| s.split_whitespace().count())
-        .unwrap_or(0)
-}
-
 fn is_git(dir: &Path) -> bool {
     dir.join(".git").exists()
 }
@@ -421,30 +233,11 @@ fn toml_version(t: &str) -> Option<String> {
     None
 }
 
-fn cap1(s: &str, n: usize) -> String {
-    let t: String = s.chars().take(n).collect();
-    if s.chars().count() > n {
-        format!("{t}…")
-    } else {
-        t
-    }
-}
-
-fn build_prompt(plan_path: &str, project: &str, task: &str) -> String {
-    let tpl = std::fs::read_to_string(config_dir().join("worker-prompt.md"))
-        .unwrap_or_else(|_| DEFAULT_PROMPT.into());
-    tpl.replace("{plan_path}", plan_path)
-        .replace("{project}", project)
-        .replace("{task}", task)
-}
-
-const DEFAULT_PROMPT: &str = "项目：{project}\n计划：{plan_path}（先读它，决策已定，不要重新讨论方案）\n\n任务：{task}\n\n约束：\n1. 只执行，不再向我提问；遇到歧义按计划里的决策自行取舍。\n2. 工作区已有未提交改动时先 `git diff` 了解进度，不要回退别人的工作。\n3. 不要 push、不要打 tag、不要改 PLAN.md 以外的全局配置。\n4. 完成后用一句话说明改了什么、还剩什么。\n";
-
 // ------------------------------------------------------------------ review
 
 fn review(a: &Value) -> Result<String, String> {
     let (repo, base, task) = if let Some(id) = a["run_id"].as_str() {
-        let (_, m) = runs()
+        let (_, m) = all_runs()
             .into_iter()
             .find(|(rid, _)| rid == id)
             .ok_or(format!("no run {id}"))?;

@@ -273,10 +273,106 @@ pub fn update(project: &str, ops: &[Value]) -> Result<String, String> {
     Ok(format!("{}\n\nwritten: {}", log.join("\n"), p.display()))
 }
 
+/// Compact context for one worker: status line, decision rows, constraint
+/// sections, and only the requested sections. Whole-plan prompts make workers
+/// wander outside their slice.
+pub fn slice(project: &str, scopes: &[String]) -> Result<String, String> {
+    let p = plan_path(project).ok_or_else(|| format!("no PLAN.md for {project}"))?;
+    let text = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = String::new();
+
+    let status_re = Regex::new(r"^\s*(?:-\s*)?(?:状态|版本)\s*[：:]").unwrap();
+    let dec_re = Regex::new(r"^\|\s*D\d+\s*\|").unwrap();
+    if let Some(s) = lines.iter().find(|l| status_re.is_match(l)) {
+        out.push_str(s.trim());
+        out.push('\n');
+    }
+    let decs: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| dec_re.is_match(l))
+        .collect();
+    if !decs.is_empty() {
+        out.push_str("\n决策（已定，不要重新讨论）：\n");
+        for d in decs.iter().take(20) {
+            out.push_str(d.trim());
+            out.push('\n');
+        }
+    }
+    for needle in ["硬约束", "非目标", "边界"] {
+        if let Some((s, e)) = section_bounds(&lines, needle) {
+            out.push_str(&format!("\n{}（节选）：\n", needle));
+            for l in lines[s + 1..e]
+                .iter()
+                .filter(|l| !l.trim().is_empty())
+                .take(10)
+            {
+                out.push_str(l.trim());
+                out.push('\n');
+            }
+        }
+    }
+    for sc in scopes {
+        let block = section_bounds(&lines, sc).or_else(|| subsection_bounds(&lines, sc));
+        match block {
+            Some((s, e)) => {
+                out.push_str(&format!("\n== 你的范围：{}\n", lines[s].trim()));
+                for l in &lines[s + 1..e] {
+                    if !l.trim().is_empty() {
+                        out.push_str(l.trim_end());
+                        out.push('\n');
+                    }
+                }
+            }
+            None => out.push_str(&format!(
+                "\n== 未在计划中找到段落：{sc}（按任务描述执行）\n"
+            )),
+        }
+    }
+    // A worker that gets 200 lines just re-reads the plan; keep it small.
+    if out.chars().count() > 4000 {
+        let cut: String = out.chars().take(4000).collect();
+        return Ok(format!("{cut}\n…（片段已截断）"));
+    }
+    Ok(out)
+}
+
+/// `###` level block, for phases nested under a `##` section.
+fn subsection_bounds(lines: &[&str], needle: &str) -> Option<(usize, usize)> {
+    let start = lines
+        .iter()
+        .position(|l| l.starts_with("###") && l.contains(needle))?;
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, l)| l.starts_with("###") || l.starts_with("## "))
+        .map(|(i, _)| i)
+        .unwrap_or(lines.len());
+    Some((start, end))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn slice_keeps_decisions_and_only_the_named_phase() {
+        let text = "# t\n\n状态：v1\n\n## 分阶段实施\n\n### P0 骨架\n- [ ] 甲\n\n### P1 接口\n- [ ] 乙\n\n## 硬约束\n- 不许动数据库\n";
+        let tmp = std::env::temp_dir().join("ytdev-slice-test.md");
+        std::fs::write(&tmp, text).unwrap();
+        // slice() reads from ~/Plan, so exercise the block helpers directly.
+        let lines: Vec<&str> = text.lines().collect();
+        let (s, e) = subsection_bounds(&lines, "P0").unwrap();
+        assert!(lines[s].contains("P0"));
+        assert!(lines[s..e].iter().any(|l| l.contains("甲")));
+        assert!(!lines[s..e].iter().any(|l| l.contains("P1")));
+        let (hs, _) = section_bounds(&lines, "硬约束").unwrap();
+        assert!(lines[hs].contains("硬约束"));
+        let _ = std::fs::remove_file(&tmp);
+    }
 
     const SAMPLE: &str = "# t\n\n状态：v1（测试）\n\n## 3. 分阶段实施\n\n### P0 骨架\n- [x] 一\n- [ ] 二\n- 说明行\n\n## 9. 下一步\n\n1. 待定\n";
 

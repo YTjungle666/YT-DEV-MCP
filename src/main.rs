@@ -7,6 +7,7 @@ use std::io::{BufRead, Write};
 mod plan;
 mod tools;
 mod util;
+mod worker;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
