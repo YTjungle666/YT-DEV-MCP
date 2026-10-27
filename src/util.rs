@@ -4,7 +4,7 @@ use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home/ytjungle".into()))
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
 }
 
 pub fn plan_root() -> PathBuf {

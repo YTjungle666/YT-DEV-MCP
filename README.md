@@ -33,7 +33,7 @@ cargo build --release
 Hermes 侧注册（stdio）：
 
 ```sh
-hermes mcp add yt-dev --command /home/ytjungle/YT-DEV-MCP/target/release/yt-dev-mcp
+hermes mcp add yt-dev --command "$PWD/target/release/yt-dev-mcp"
 ```
 
 手写 `~/.hermes/config.yaml` 时注意：stdio 子进程只继承过滤后的环境，`PATH` 必须包含 `gitleaks`、`osv-scanner`、`cargo` 所在目录。
@@ -41,11 +41,11 @@ hermes mcp add yt-dev --command /home/ytjungle/YT-DEV-MCP/target/release/yt-dev-
 ```yaml
 mcp_servers:
   yt-dev:
-    command: /home/ytjungle/YT-DEV-MCP/target/release/yt-dev-mcp
+    command: /path/to/YT-DEV-MCP/target/release/yt-dev-mcp
     timeout: 900
     connect_timeout: 60
     env:
-      PATH: /home/ytjungle/.local/bin:/home/ytjungle/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+      PATH: ~/.local/bin:~/.cargo/bin:/usr/local/bin:/usr/bin:/bin  # 展开后的绝对路径
 ```
 
 ## 配置与状态
