@@ -1,21 +1,23 @@
 //! codex worker lifecycle. Each worker gets a plan *slice*, its own git worktree
 //! when it runs in parallel, and hard CPU/memory caps via a systemd user scope.
 
+use crate::config::cfg;
 use crate::plan;
 use crate::tools::repo_of;
 use crate::util::{
-    all_runs, cap1, cap_lines, config_dir, config_limits, dir_bytes, epoch, git, home, out_str,
-    pid_alive, proc_stats, run, runs_dir, which,
+    all_runs, cap1, cap_lines, config_limits, dir_bytes, epoch, git, out_str, pid_alive,
+    proc_stats, run, runs_dir, which,
 };
 use serde_json::{json, Value};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-const DEFAULT_MEM_MB: u64 = 4096;
-const DEFAULT_CPU_PCT: u32 = 50;
-const MAX_PARALLEL: usize = 6;
 const MB: u64 = 1024 * 1024;
+
+fn worktree_root() -> PathBuf {
+    cfg().paths.state_dir.join(&cfg().worker.worktree_subdir)
+}
 
 pub fn run_action(a: &Value) -> Result<String, String> {
     match a["action"].as_str().unwrap_or("") {
@@ -40,10 +42,11 @@ fn start_batch(a: &Value) -> Result<String, String> {
     if tasks.is_empty() {
         return Err("start_batch: empty tasks".into());
     }
-    if tasks.len() > MAX_PARALLEL {
+    if tasks.len() > cfg().limits.max_parallel {
         return Err(format!(
-            "start_batch: {} tasks > hard limit {MAX_PARALLEL} (split into waves)",
-            tasks.len()
+            "start_batch: {} tasks > hard limit {} (split into waves)",
+            tasks.len(),
+            cfg().limits.max_parallel
         ));
     }
     let mut lines = Vec::new();
@@ -90,12 +93,13 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
             max_store_mb,
             pruned.len(),
             after / MB,
-            home().join(".cache/yt-dev/wt").display()
+            worktree_root().display()
         ));
     }
     let _ = git(&repo, &["worktree", "prune"]);
-    let mem_mb = a["mem_mb"].as_u64().unwrap_or(DEFAULT_MEM_MB);
-    let cpu_pct = a["cpu_pct"].as_u64().unwrap_or(DEFAULT_CPU_PCT as u64) as u32;
+    let mem_mb = a["mem_mb"].as_u64().unwrap_or(cfg().limits.mem_mb);
+    let cpu_pct = a["cpu_pct"].as_u64().unwrap_or(cfg().limits.cpu_pct as u64) as u32;
+
     let want_wt = a["worktree"].as_bool().unwrap_or(false) || a["action"] == json!("start_batch");
 
     let id = crate::util::stamp();
@@ -104,8 +108,9 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
 
     // Parallel workers must not share a working tree.
     let (cwd, branch) = if want_wt && repo.join(".git").exists() {
-        let wt = home().join(".cache/yt-dev/wt").join(&id);
-        let br = format!("yt-dev/{id}");
+        let wt = worktree_root().join(&id);
+        let br = format!("{}{id}", cfg().worker.branch_prefix);
+
         if let Some(p) = wt.parent() {
             std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
         }
@@ -143,15 +148,13 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
     let base = git(&cwd, &["rev-parse", "HEAD"]);
 
     let mut cmd = capped_command(mem_mb, cpu_pct)?;
-    cmd.args([
-        "exec",
-        "--dangerously-bypass-approvals-and-sandbox",
-        &prompt,
-    ])
-    .current_dir(&cwd)
-    .stdin(Stdio::null())
-    .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
-    .stderr(Stdio::from(log));
+    cmd.args(&cfg().worker.args)
+        .arg(&prompt)
+        .current_dir(&cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
+        .stderr(Stdio::from(log));
+
     unsafe {
         cmd.pre_exec(|| {
             setsid();
@@ -200,7 +203,9 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
 
 /// systemd-run --user --scope gives hard MemoryMax/CPUQuota without a root helper.
 fn capped_command(mem_mb: u64, cpu_pct: u32) -> Result<Command, String> {
-    let codex = which("codex").ok_or("codex not on PATH")?;
+    let w = &cfg().worker;
+    let bin = which(&w.bin).ok_or_else(|| format!("{} not on PATH", w.bin))?;
+    let nice = w.nice.to_string();
     let sd = which("systemd-run");
     if let Some(sd) = sd {
         let probe = run(
@@ -221,15 +226,15 @@ fn capped_command(mem_mb: u64, cpu_pct: u32) -> Result<Command, String> {
                 "--",
                 "nice",
                 "-n",
-                "10",
+                &nice,
             ])
-            .arg(codex);
+            .arg(bin);
             return Ok(c);
         }
     }
     // No user scope available: still de-prioritise, and say so in the run log.
     let mut c = Command::new("nice");
-    c.arg("-n").arg("10").arg(codex);
+    c.arg("-n").arg(&nice).arg(bin);
     Ok(c)
 }
 
@@ -244,7 +249,7 @@ fn store_roots() -> Vec<PathBuf> {
             }
         }
     }
-    let wt = home().join(".cache/yt-dev/wt");
+    let wt = worktree_root();
     if wt.is_dir() {
         v.push(wt);
     }
@@ -305,7 +310,7 @@ fn prune_store(cap_mb: u64, keep_runs: usize) -> (u64, u64, Vec<String>) {
     }
 
     if total > cap {
-        let wtdir = home().join(".cache/yt-dev/wt");
+        let wtdir = worktree_root();
         let mut dirs: Vec<PathBuf> = std::fs::read_dir(&wtdir)
             .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
             .unwrap_or_default();
@@ -353,15 +358,19 @@ fn status(a: &Value) -> Result<String, String> {
     let dirty = git(&cwd, &["status", "--porcelain"]);
     let mut changes = diffstat.clone();
     if !dirty.trim().is_empty() {
-        changes.push_str(&format!("\n-- status --\n{}", cap_lines(&dirty, 12)));
+        changes.push_str(&format!(
+            "\n-- status --\n{}",
+            cap_lines(&dirty, cfg().limits.log_tail_lines)
+        ));
     }
     let children = if alive { git_children(pid) } else { 0 };
-    let stalled = alive && idle.unwrap_or(0) > 300 && children == 0;
+    let stalled = alive && idle.unwrap_or(0) > cfg().limits.stall_secs && children == 0;
     let disk = out_str(&run("du", &["-sh", cwd.to_str().unwrap_or(".")], None));
     let (cap_mb, _) = config_limits();
     let tail = std::fs::read_to_string(&log)
-        .map(|t| cap_lines(&t, 30))
+        .map(|t| cap_lines(&t, cfg().limits.log_tail_lines))
         .unwrap_or_default();
+
     Ok(format!(
         "run {id} | {} | pid {pid} alive={alive} | {}s | cpu {cpu:.1}% rss {rss}MB | log idle {}s | children {children}{}\n\
          disk {} | mem_cap {}MB | cpu_cap {}%{}\nstore {}MB / cap {}MB\n\n== diffstat\n{}\n\n== log tail\n{}",
@@ -386,7 +395,7 @@ fn list() -> Result<String, String> {
         return Ok("no runs".into());
     }
     let mut s = String::new();
-    for (id, m) in all.iter().take(20) {
+    for (id, m) in all.iter().take(cfg().limits.max_items) {
         let alive = pid_alive(m["pid"].as_i64().unwrap_or(0));
         s.push_str(&format!(
             "{id} | {} | {} | pid {} alive={alive} | {}\n",
@@ -418,14 +427,15 @@ fn kill(a: &Value) -> Result<String, String> {
     }
     // Kill the whole scope/process group: codex spawns children (node, rustc).
     let _ = run("kill", &["-TERM", "--", &format!("-{pid}")], None);
-    for _ in 0..20 {
+    let grace = cfg().limits.kill_grace_secs;
+    for _ in 0..grace * 2 {
         std::thread::sleep(std::time::Duration::from_millis(500));
         if !pid_alive(pid) {
             return Ok(format!("run {id}: terminated (SIGTERM to process group)"));
         }
     }
     let _ = run("kill", &["-KILL", "--", &format!("-{pid}")], None);
-    Ok(format!("run {id}: SIGKILL after 10s"))
+    Ok(format!("run {id}: SIGKILL after {grace}s"))
 }
 
 fn git_children(pid: i64) -> usize {
@@ -447,27 +457,68 @@ fn build_prompt(
     mem_mb: u64,
     cpu_pct: u32,
 ) -> String {
-    let tpl = std::fs::read_to_string(config_dir().join("worker-prompt.md"))
-        .unwrap_or_else(|_| DEFAULT_PROMPT.into());
+    let w = &cfg().worker;
+    let tpl =
+        std::fs::read_to_string(&cfg().paths.worker_prompt).unwrap_or_else(|_| w.prompt.clone());
     let scope = if scopes.is_empty() {
         "（未指定：只做任务描述里明确的那部分）".to_string()
     } else {
         scopes.join("、")
     };
-    tpl.replace("{project}", project)
+    let rules: String = render_rules(&w.rules);
+    tpl.replace("{rules}", &rules)
+        .replace("{project}", project)
         .replace("{task}", task)
         .replace("{scope}", &scope)
         .replace("{slice}", slice)
         .replace("{plan_path}", plan_path)
         .replace("{mem_mb}", &mem_mb.to_string())
         .replace("{cpu_pct}", &cpu_pct.to_string())
+        .replace("{max_file_lines}", &w.max_file_lines.to_string())
+        .replace("{max_fn_lines}", &w.max_fn_lines.to_string())
 }
 
-const DEFAULT_PROMPT: &str = "项目：{project}\n完整计划：{plan_path}（只在需要查证时读，不要通读全篇）\n\n你只负责这一部分：{scope}\n\n计划片段（决策已定，不要重新讨论方案）：\n{slice}\n\n任务：{task}\n\n硬约束：\n1. 只执行，不提问；歧义按片段里的决策取舍。范围外的文件一律不碰，确需改动先写进最后的说明里而不是直接改。\n2. 模块化：一个文件一个职责；新逻辑放独立模块，不往大文件里继续堆；单文件超过 400 行或函数超过 60 行就拆。\n3. 资源上限：本进程 MemoryMax={mem_mb}M、CPUQuota={cpu_pct}%；不要起常驻进程，不要跑全量基准，不要下载大文件。\n4. 性能优先：先看复杂度，避免 O(n²) 和每请求分配；复用仓库已有实现，不新造轮子；性能与可读性冲突时选性能，并注释说明。\n5. 不 push、不打 tag、不改 PLAN.md。\n6. 结束用一句话说明改了什么、没做什么。\n7. 语言：新项目默认 Rust（跨平台核心、常驻进程、命令行工具一律 Rust）。仓库里已有源码的，沿用仓库原有的语言，不要为了“更现代”换语言；只有计划里明确写了“重构/迁移”，才按计划的边界换。要不要换语言不由你决定，写进最后说明留给 YT。\n8. Rust 构建时间：日常验证只跑 `cargo check` 或 debug `cargo build`，`--release` 收尾验一次就够；release 用 opt-level=3 + lto=\"thin\"，fat LTO 只留给 CI 发版（本机实测 fat LTO 每次改一行都要 7.8s 重链，关掉是 1.2s）。本机已装 sccache 与 mold 并写进 ~/.cargo/config.toml，不要覆盖或清掉。\n";
+pub const DEFAULT_PROMPT: &str = include_str!("../assets/worker-prompt.md");
+
+fn render_rules(rules: &[String]) -> String {
+    rules
+        .iter()
+        .enumerate()
+        .map(|(i, r)| format!("{}. {r}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// worker 的硬约束条目（config `[worker] rules` 覆盖）；`{…}` 占位符同样会被替换。
+pub const DEFAULT_RULES: [&str; 10] = [
+    "只执行，不提问；歧义按片段里的决策取舍。范围外的文件一律不碰，确需改动先写进最后的说明里而不是直接改。",
+    "不硬编码：路径、端口、超时、上限、命令、模型名、外部 URL 都从配置文件或参数读，并给默认值与示例；代码里不留只有本机才成立的常量。",
+    "可扩展：多一种实现、多一种来源、多一个可调项，只加配置或新模块，不改既有调用方；也不为“以后可能用到”提前抽象。",
+    "模块化：一个文件一个职责；新逻辑放独立模块，不往大文件里继续堆；单文件超过 {max_file_lines} 行或函数超过 {max_fn_lines} 行就拆。",
+    "资源上限：本进程 MemoryMax={mem_mb}M、CPUQuota={cpu_pct}%；不要起常驻进程，不要跑全量基准，不要下载大文件。",
+    "性能优先：先看复杂度，避免 O(n²) 和每请求分配；复用仓库已有实现，不新造轮子；性能与可读性冲突时选性能，并注释说明。",
+    "不 push、不打 tag、不改 PLAN.md。",
+    "结束用一句话说明改了什么、没做什么。",
+    "语言：新项目默认 Rust（跨平台核心、常驻进程、命令行工具一律 Rust）。仓库里已有源码的，沿用仓库原有的语言，不要为了“更现代”换语言；只有计划里明确写了“重构/迁移”，才按计划的边界换。要不要换语言不由你决定，写进最后说明留给 YT。",
+    "Rust 构建时间：日常验证只跑 `cargo check` 或 debug `cargo build`，`--release` 收尾验一次就够；release 用 opt-level=3 + lto=\"thin\"，fat LTO 只留给 CI 发版。本机已装 sccache 与 mold 并写进 ~/.cargo/config.toml，不要覆盖或清掉。",
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rules_render_numbered_and_default_prompt_wires_them() {
+        assert_eq!(
+            render_rules(&["甲".to_string(), "乙".to_string()]),
+            "1. 甲\n2. 乙"
+        );
+        let all = DEFAULT_RULES.join("\n");
+        assert!(all.contains("不硬编码"), "少了不硬编码约束");
+        assert!(all.contains("可扩展"), "少了可扩展约束");
+        assert!(all.contains("{max_file_lines}"), "行数上限要走占位符");
+        assert!(DEFAULT_PROMPT.contains("{rules}"), "模板没接上 rules");
+    }
 
     #[test]
     fn prune_drops_oldest_runs_until_under_cap() {
@@ -476,6 +527,8 @@ mod tests {
         let runs = tmp.join("Plan/p/runs");
         std::fs::create_dir_all(&runs).unwrap();
         std::env::set_var("HOME", &tmp);
+        crate::config::reset();
+
         for i in 0..3 {
             let id = format!("100{i}-000000");
             std::fs::write(
@@ -491,5 +544,6 @@ mod tests {
         assert!(!removed.is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::remove_var("HOME");
+        crate::config::reset();
     }
 }

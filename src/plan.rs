@@ -1,6 +1,7 @@
 //! PLAN.md parsing and surgical write-back. Everything degrades to raw text
 //! instead of silently reporting "nothing found".
 
+use crate::config::cfg;
 use crate::util::plan_root;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -8,7 +9,7 @@ use std::path::PathBuf;
 
 pub fn plan_path(project: &str) -> Option<PathBuf> {
     let dir = plan_root().join(project);
-    for name in ["PLAN.md", "plan.md", "Plan.md"] {
+    for name in &cfg().plan.files {
         let p = dir.join(name);
         if p.is_file() {
             return Some(p);
@@ -30,9 +31,27 @@ pub fn list_projects() -> Vec<String> {
     v
 }
 
-fn status_line_re() -> &'static Regex {
-    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\s*(?:-\s*)?(?:状态|版本)\s*[：:]").unwrap())
+fn status_line_re() -> Regex {
+    let alt: Vec<String> = cfg()
+        .plan
+        .status_markers
+        .iter()
+        .map(|m| regex::escape(m))
+        .collect();
+    build(&format!(r"^\s*(?:-\s*)?(?:{})\s*[：:]", alt.join("|")))
+}
+
+fn decision_re() -> Regex {
+    let p = regex::escape(&cfg().plan.decision_prefix);
+    build(&format!(r"^\|\s*({p}\d+)\s*\|"))
+}
+
+/// 配置里写坏的正则不该让整个工具崩：退化成永不匹配。
+fn build(pat: &str) -> Regex {
+    Regex::new(pat).unwrap_or_else(|e| {
+        eprintln!("yt-dev: 配置正则 {pat:?} 无效: {e}");
+        Regex::new("$^").expect("空正则")
+    })
 }
 
 fn section_bounds(lines: &[&str], needle: &str) -> Option<(usize, usize)> {
@@ -70,14 +89,14 @@ pub struct Plan {
 
 pub fn parse(text: &str) -> Plan {
     let lines: Vec<&str> = text.lines().collect();
-    let status_re = Regex::new(r"^\s*(?:-\s*)?(?:状态|版本)\s*[：:]").unwrap();
+    let status_re = status_line_re();
     let status_line = lines
         .iter()
         .find(|l| status_re.is_match(l))
         .map(|l| l.trim().to_string());
 
     let mut decisions = Vec::new();
-    let dec_re = Regex::new(r"^\|\s*(D\d+)\s*\|").unwrap();
+    let dec_re = decision_re();
     for l in &lines {
         if let Some(c) = dec_re.captures(l) {
             let cells: Vec<&str> = l
@@ -94,9 +113,11 @@ pub fn parse(text: &str) -> Plan {
     }
 
     let mut phases = Vec::new();
-    if let Some((s, e)) = section_bounds(&lines, "分阶段")
-        .or_else(|| section_bounds(&lines, "实施步骤"))
-        .or_else(|| section_bounds(&lines, "步骤"))
+    if let Some((s, e)) = cfg()
+        .plan
+        .phase_sections
+        .iter()
+        .find_map(|n| section_bounds(&lines, n))
     {
         let mut cur: Option<(String, Vec<Value>)> = None;
         for l in &lines[s..e] {
@@ -142,12 +163,14 @@ pub fn parse(text: &str) -> Plan {
             })
             .unwrap_or_default()
     };
-    let verify = bullets("验证");
-    let yt_todos = bullets("YT 侧待办")
-        .into_iter()
-        .chain(bullets("YT 待办"))
+    let verify = bullets(&cfg().plan.verify_section);
+    let yt_todos = cfg()
+        .plan
+        .todo_sections
+        .iter()
+        .flat_map(|n| bullets(n))
         .collect();
-    let next_step = bullets("下一步");
+    let next_step = bullets(&cfg().plan.next_section);
 
     Plan {
         status_line,
@@ -261,7 +284,7 @@ pub fn update(project: &str, ops: &[Value]) -> Result<String, String> {
                     .to_string();
                 let at = lines
                     .iter()
-                    .position(|l| l.starts_with("## ") && l.contains("下一步"))
+                    .position(|l| l.starts_with("## ") && l.contains(&cfg().plan.next_section))
                     .unwrap_or(lines.len());
                 lines.insert(at, format!("- {note}"));
                 log.push(format!("L{}: +- {}", at + 1, note));
@@ -287,8 +310,8 @@ pub fn slice(project: &str, scopes: &[String]) -> Result<String, String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = String::new();
 
-    let status_re = Regex::new(r"^\s*(?:-\s*)?(?:状态|版本)\s*[：:]").unwrap();
-    let dec_re = Regex::new(r"^\|\s*D\d+\s*\|").unwrap();
+    let status_re = status_line_re();
+    let dec_re = decision_re();
     if let Some(s) = lines.iter().find(|l| status_re.is_match(l)) {
         out.push_str(s.trim());
         out.push('\n');
@@ -300,18 +323,18 @@ pub fn slice(project: &str, scopes: &[String]) -> Result<String, String> {
         .collect();
     if !decs.is_empty() {
         out.push_str("\n决策（已定，不要重新讨论）：\n");
-        for d in decs.iter().take(20) {
+        for d in decs.iter().take(cfg().limits.decisions_max) {
             out.push_str(d.trim());
             out.push('\n');
         }
     }
-    for needle in ["硬约束", "非目标", "边界"] {
+    for needle in &cfg().plan.constraint_sections {
         if let Some((s, e)) = section_bounds(&lines, needle) {
             out.push_str(&format!("\n{}（节选）：\n", needle));
             for l in lines[s + 1..e]
                 .iter()
                 .filter(|l| !l.trim().is_empty())
-                .take(10)
+                .take(cfg().limits.constraint_lines_max)
             {
                 out.push_str(l.trim());
                 out.push('\n');
@@ -336,8 +359,9 @@ pub fn slice(project: &str, scopes: &[String]) -> Result<String, String> {
         }
     }
     // A worker that gets 200 lines just re-reads the plan; keep it small.
-    if out.chars().count() > 4000 {
-        let cut: String = out.chars().take(4000).collect();
+    let max = cfg().limits.slice_max_chars;
+    if out.chars().count() > max {
+        let cut: String = out.chars().take(max).collect();
         return Ok(format!("{cut}\n…（片段已截断）"));
     }
     Ok(out)

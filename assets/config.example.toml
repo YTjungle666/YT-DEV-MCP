@@ -1,0 +1,133 @@
+# yt-dev MCP 配置（全部键都可省略：省略 = 下面写的值就是代码默认值）
+#
+# 生效方式：文件改了下一次工具调用就生效，不用重启 MCP。
+# 解析失败会在 stderr 留一行，并沿用代码默认值。
+# 位置：$YT_DEV_CONFIG_DIR/config.toml，默认 ~/.config/yt-dev/config.toml。
+# 路径里可以用 ~/，会展开成家目录。
+
+[paths]
+plan_root = "~/Plan"                       # 项目计划根目录
+state_dir = "~/.cache/yt-dev"              # worktree 与临时产物
+projects = "~/.config/yt-dev/projects.toml"        # project → repo 显式映射
+worker_prompt = "~/.config/yt-dev/worker-prompt.md" # 存在则覆盖 [worker] prompt
+review_prompt = "~/.config/yt-dev/review-prompt.md" # 存在则覆盖 [review] prompt
+gitleaks_config = "~/.config/yt-dev/gitleaks.toml"  # 存在则给 gitleaks 加 --config
+license_file = "~/.config/yt-dev/LICENSE"  # 存在则用作 dev_publish 的默认 license 正文
+ci_template = "~/.config/yt-dev/ci.yml"    # 存在则用作 dev_publish 写入的 CI workflow
+
+[limits]
+max_store_mb = 4096        # run 日志/元数据 + worktree 总占用上限（MB），可按次覆盖
+keep_runs = 30             # 无论占用多少，最多保留这么多个 run（运行中的不删）
+mem_mb = 4096              # worker 默认 MemoryMax
+cpu_pct = 50               # worker 默认 CPUQuota
+max_parallel = 6           # start_batch 一次最多几个 worker
+gate_timeout_secs = 600    # dev_gate 单步超时
+slice_max_chars = 4000     # 给 worker 的计划切片上限
+max_items = 20             # 报告里各类清单最多列几条
+readme_min_chars = 600     # dev_publish 的 README 下限
+stall_secs = 300           # 日志不动多久算卡死嫌疑
+log_tail_lines = 30        # status 里日志/dirty 尾部行数
+gitleaks_max_mb = 5        # 单文件扫描上限
+decisions_max = 20         # 切片里带几条决策
+constraint_lines_max = 10  # 切片里每个约束段落带几行
+kill_grace_secs = 10       # SIGTERM 到 SIGKILL 的等待
+
+[plan]
+# 换一种写法的 PLAN.md 只改这里，不用改代码。
+files = ["PLAN.md", "plan.md", "Plan.md"]
+phase_sections = ["分阶段", "实施步骤", "步骤"]
+verify_section = "验证"
+todo_sections = ["YT 侧待办", "YT 待办"]
+next_section = "下一步"
+constraint_sections = ["硬约束", "非目标", "边界"]
+status_markers = ["状态", "版本"]
+decision_prefix = "D"
+repo_markers = ["仓库目标位置", "交付仓库", "仓库位置"]
+
+[worker]
+bin = "codex"
+args = ["exec", "--dangerously-bypass-approvals-and-sandbox"]  # prompt 追加在最后
+nice = 10
+branch_prefix = "yt-dev/"
+worktree_subdir = "wt"
+max_file_lines = 400       # 模块化条款里的 {max_file_lines}
+max_fn_lines = 60          # 模块化条款里的 {max_fn_lines}
+# rules 是拼进每个 worker prompt 的硬约束条目，按顺序自动编号，
+# 条目里的 {max_file_lines} / {mem_mb} 等占位符同样会被替换。
+# 省略 = 内置 10 条（含“不硬编码/可扩展”两条）。改条数、改措辞都只动这里。
+# rules = [
+#   "不硬编码：路径、端口、上限、命令都从配置读，并给默认值。",
+#   "可扩展：多一种实现只加配置或新模块，不改既有调用方。",
+# ]
+# prompt 模板正文：省略 = 内置 assets/worker-prompt.md（占位符 {project} {task} {scope} {slice} {plan_path} {rules} {mem_mb} {cpu_pct} {max_file_lines} {max_fn_lines}）
+# prompt = "..."
+
+[review]
+bin = "codex"
+args = ["exec", "--profile", "strong", "--dangerously-bypass-approvals-and-sandbox", "-o", "{out}"]
+# 模板正文省略 = 内置 assets/review-prompt.md（占位符 {base} {task}）
+# prompt = "..."
+
+
+[publish]
+license = "PolyForm-Noncommercial-1.0.0"
+branch = "main"
+ci_file = ".github/workflows/ci.yml"
+remote_template = "git@github.com:{slug}.git"
+required_checks = ["ci"]
+enforce_admins = false
+visibility = "public"
+
+# 加一种语言的门禁 = 加一个 profile，按顺序取第一个命中 detect 文件的。
+[[gate.profiles]]
+name = "rust"
+detect = ["Cargo.toml"]
+steps = [
+  { name = "fmt", cmd = ["cargo", "fmt", "--check"] },
+  { name = "clippy", cmd = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"] },
+  { name = "test", cmd = ["cargo", "test"] },
+  { name = "build-release", cmd = ["cargo", "build", "--release"], full_only = true },
+]
+
+[[gate.profiles]]
+name = "node"
+detect = ["package.json"]
+steps = [
+  { name = "build", cmd = ["npm", "run", "build"], needs = "\"build\"" },
+  { name = "test", cmd = ["npm", "test"], needs = "\"test\"" },
+]
+
+[[gate.profiles]]
+name = "make"
+detect = ["Makefile"]
+steps = [
+  { name = "verify", cmd = ["make", "verify"], needs = "verify:" },
+]
+
+# 单个项目覆盖上面所有 profile（name 省略时用 cmd 第一个词）。
+[gate.overrides]
+# demo = [{ name = "lint", cmd = ["make", "lint"] }]
+
+[[selftest.required]]
+name = "gitleaks"
+hint = "gh release download -R gitleaks/gitleaks"
+
+[[selftest.required]]
+name = "osv-scanner"
+hint = "gh release download -R google/osv-scanner"
+
+[[selftest.required]]
+name = "cargo"
+hint = "rustup/apt: install cargo"
+
+[[selftest.required]]
+name = "codex"
+hint = "npm install -g @openai/codex"
+
+[[selftest.required]]
+name = "git"
+hint = "apt install git"
+
+[[selftest.required]]
+name = "gh"
+hint = "apt install gh"

@@ -1,15 +1,17 @@
 //! GitHub publishing with the house rules baked in: license default, derived-code
 //! license match, README requirement, secret scan gate, branch protection.
 
+use crate::config::cfg;
 use crate::tools::repo_of;
-use crate::util::{cap_lines, config_dir, epoch, git, out_str, redact, run, which};
+use crate::util::{cap_lines, epoch, git, out_str, redact, run, which};
 use serde_json::{json, Value};
 
-const DEFAULT_LICENSE: &str = "PolyForm-Noncommercial-1.0.0";
+/// 内置兜底：`paths.license_file` / `paths.ci_template` 不存在时用这两份。
 const LICENSE_TEXT: &str = include_str!("../assets/PolyForm-Noncommercial-1.0.0.md");
 const CI_YML: &str = include_str!("../assets/ci.yml");
 
 pub fn run_publish(a: &Value) -> Result<String, String> {
+    let c = cfg();
     let project = a["project"].as_str().ok_or("publish needs project")?;
     let repo_dir = repo_of(project).ok_or(format!("cannot resolve repo for {project}"))?;
     if which("gh").is_none() {
@@ -56,10 +58,11 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
     }
 
     // 2. README
+    let min_readme = c.limits.readme_min_chars;
     match std::fs::read_to_string(repo_dir.join("README.md")) {
-        Ok(t) if t.chars().count() >= 600 => {}
+        Ok(t) if t.chars().count() >= min_readme => {}
         Ok(t) => blockers.push(format!(
-            "README.md 只有 {} 字符（要求 ≥600）",
+            "README.md 只有 {} 字符（要求 ≥{min_readme}）",
             t.chars().count()
         )),
         Err(_) => blockers.push("缺 README.md".into()),
@@ -67,7 +70,11 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
 
     // 3. license: derived code must match upstream, otherwise the house default
     let lic_path = repo_dir.join("LICENSE");
-    let mut expected = a["license"].as_str().unwrap_or(DEFAULT_LICENSE).to_string();
+    let mut expected = a["license"]
+        .as_str()
+        .unwrap_or(c.publish.license.as_str())
+        .to_string();
+
     let mut upstream_text: Option<String> = None;
     if let Some(up) = &upstream {
         let spdx = out_str(&run(
@@ -97,9 +104,11 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
     }
     let cur = std::fs::read_to_string(&lic_path).unwrap_or_default();
     if cur.trim().is_empty() {
-        let body = upstream_text
-            .clone()
-            .unwrap_or_else(|| LICENSE_TEXT.to_string());
+        let body = upstream_text.clone().unwrap_or_else(|| {
+            std::fs::read_to_string(&c.paths.license_file)
+                .unwrap_or_else(|_| LICENSE_TEXT.to_string())
+        });
+
         actions.push(format!("写 LICENSE（{expected}）"));
         if !dry {
             std::fs::write(&lic_path, body).map_err(|e| e.to_string())?;
@@ -112,7 +121,7 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
 
     // 4. secret scan gate
     let tmp = std::env::temp_dir().join(format!("yt-dev-pub-{}.json", epoch()));
-    let cfg = config_dir().join("gitleaks.toml");
+    let gl_cfg = c.paths.gitleaks_config.clone();
     if let Some(bin) = which("gitleaks") {
         let mut args: Vec<String> = vec![
             "dir".into(),
@@ -123,14 +132,15 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
             "--exit-code".into(),
             "0".into(),
             "--max-target-megabytes".into(),
-            "5".into(),
+            c.limits.gitleaks_max_mb.to_string(),
             "--report-path".into(),
             tmp.display().to_string(),
         ];
-        if cfg.is_file() {
+        if gl_cfg.is_file() {
             args.push("--config".into());
-            args.push(cfg.display().to_string());
+            args.push(gl_cfg.display().to_string());
         }
+
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let _ = run(bin.to_str().unwrap_or("gitleaks"), &refs, None);
         let hits = std::fs::read_to_string(&tmp)
@@ -155,19 +165,33 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
     }
 
     // 5. CI workflow (required by the protection rule below)
-    let wf = repo_dir.join(".github/workflows/ci.yml");
+    let wf = repo_dir.join(&c.publish.ci_file);
     if !wf.is_file() {
-        actions.push("写 .github/workflows/ci.yml（保护规则要求 ci 通过）".into());
+        actions.push(format!(
+            "写 {}（保护规则要求进 main 前 ci 通过）",
+            c.publish.ci_file
+        ));
         if !dry {
-            std::fs::create_dir_all(wf.parent().unwrap()).map_err(|e| e.to_string())?;
-            std::fs::write(&wf, CI_YML).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(wf.parent().unwrap_or(&repo_dir)).map_err(|e| e.to_string())?;
+            let tpl = std::fs::read_to_string(&c.paths.ci_template)
+                .unwrap_or_else(|_| CI_YML.to_string());
+            std::fs::write(&wf, tpl).map_err(|e| e.to_string())?;
         }
     }
 
     // 6. branch + remote + push
+    let target = c.publish.branch.as_str();
+    let remote_url = c.publish.remote_template.replace("{slug}", &slug);
+    let vis = a["visibility"]
+        .as_str()
+        .unwrap_or(c.publish.visibility.as_str())
+        .to_string();
+    if vis != "public" && vis != "private" {
+        return Err(format!("visibility 只能是 public 或 private，收到 {vis:?}"));
+    }
     let branch = git(&repo_dir, &["rev-parse", "--abbrev-ref", "HEAD"]);
-    if branch != "main" {
-        actions.push(format!("git branch -M main（当前 {branch}）"));
+    if branch != target {
+        actions.push(format!("git branch -M {target}（当前 {branch}）"));
     }
     let has_origin = !git(&repo_dir, &["remote"])
         .lines()
@@ -177,25 +201,25 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
         .success();
     if !exists {
         actions.push(format!(
-            "gh repo create {slug} --public --source . --remote origin --push"
+            "gh repo create {slug} --{vis} --source . --remote origin --push"
         ));
     } else if !has_origin {
-        actions.push(format!("git remote add origin git@github.com:{slug}.git"));
-        actions.push("git push -u origin main".into());
+        actions.push(format!("git remote add origin {remote_url}"));
+        actions.push(format!("git push -u origin {target}"));
     } else if git(
         &repo_dir,
         &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
     )
     .is_empty()
     {
-        actions.push("git push -u origin main".into());
+        actions.push(format!("git push -u origin {target}"));
     } else {
         actions.push("git push".into());
     }
-    actions.push(
-        "保护 main：禁止强推/删除，要求 ci 通过（PR 合并前必须绿；admin 可直推，单人仓库不锁死自己）"
-            .to_string(),
-    );
+    actions.push(format!(
+        "保护 {target}：禁止强推/删除，要求 {} 通过（PR 合并前必须绿；admin 可直推，单人仓库不锁死自己）",
+        c.publish.required_checks.join("+")
+    ));
 
     let mut out = format!(
         "== publish {project} → {slug} ({})\n",
@@ -223,11 +247,10 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
     }
 
     // --- execute
-    if branch != "main" {
-        git(&repo_dir, &["branch", "-M", "main"]);
+    if branch != target {
+        git(&repo_dir, &["branch", "-M", target]);
     }
     if !exists {
-        let vis = a["visibility"].as_str().unwrap_or("public");
         let o = run(
             "gh",
             &[
@@ -251,26 +274,18 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
         }
     } else {
         if !has_origin {
-            git(
-                &repo_dir,
-                &[
-                    "remote",
-                    "add",
-                    "origin",
-                    &format!("git@github.com:{slug}.git"),
-                ],
-            );
+            git(&repo_dir, &["remote", "add", "origin", &remote_url]);
         }
-        let push = run("git", &["push", "-u", "origin", "main"], Some(&repo_dir));
+        let push = run("git", &["push", "-u", "origin", target], Some(&repo_dir));
         if !push.status.success() {
             return Err(format!("git push 失败: {}", cap_lines(&out_str(&push), 8)));
         }
     }
 
-    // --- protection + verify
+    // --- protection + verify（强推/删除始终禁死，只允许配置 admin 与 required checks）
     let payload = json!({
-        "required_status_checks": {"strict": true, "contexts": ["ci"]},
-        "enforce_admins": false,
+        "required_status_checks": {"strict": true, "contexts": c.publish.required_checks},
+        "enforce_admins": c.publish.enforce_admins,
         "required_pull_request_reviews": null,
         "restrictions": null,
         "allow_force_pushes": false,
@@ -284,7 +299,7 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
             "api",
             "-X",
             "PUT",
-            &format!("repos/{slug}/branches/main/protection"),
+            &format!("repos/{slug}/branches/{target}/protection"),
             "--input",
             pf.to_str().unwrap_or(""),
         ],
@@ -299,7 +314,7 @@ pub fn run_publish(a: &Value) -> Result<String, String> {
     } else {
         let check = out_str(&run(
             "gh",
-            &["api", &format!("repos/{slug}/branches/main/protection"), "--jq",
+            &["api", &format!("repos/{slug}/branches/{target}/protection"), "--jq",
               "[.required_status_checks.contexts, .allow_force_pushes.enabled, .enforce_admins.enabled]"],
             None,
         ));

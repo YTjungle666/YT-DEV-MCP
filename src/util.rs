@@ -8,11 +8,7 @@ pub fn home() -> PathBuf {
 }
 
 pub fn plan_root() -> PathBuf {
-    home().join("Plan")
-}
-
-pub fn config_dir() -> PathBuf {
-    home().join(".config/yt-dev")
+    crate::config::cfg().paths.plan_root.clone()
 }
 
 pub fn epoch() -> i64 {
@@ -82,20 +78,23 @@ pub fn which(bin: &str) -> Option<PathBuf> {
 }
 
 pub fn selftest() -> i32 {
-    let checks = [
-        ("gitleaks", "gh release download v8.30.1 -R gitleaks/gitleaks -p 'gitleaks_8.30.1_linux_x64.tar.gz'"),
-        ("osv-scanner", "gh release download v2.7.0 -R google/osv-scanner -p osv-scanner_linux_amd64"),
-        ("cargo", "rustup/apt: install cargo"),
-        ("codex", "npm install -g @openai/codex"),
-        ("git", "apt install git"),
-        ("gh", "apt install gh"),
-    ];
+    let cfg_path = crate::config::file();
+    match std::fs::read_to_string(&cfg_path) {
+        Ok(t) => match toml::from_str::<crate::config::Config>(&t) {
+            Ok(_) => println!("ok       config {}", cfg_path.display()),
+            Err(e) => println!("ERROR    config {} — {e}", cfg_path.display()),
+        },
+        Err(_) => println!(
+            "ok       config {} (缺省，用代码默认值)",
+            cfg_path.display()
+        ),
+    }
     let mut bad = 0;
-    for (b, hint) in checks {
-        match which(b) {
-            Some(p) => println!("ok       {b} -> {}", p.display()),
+    for req in &crate::config::cfg().selftest.required {
+        match which(&req.name) {
+            Some(p) => println!("ok       {} -> {}", req.name, p.display()),
             None => {
-                println!("MISSING  {b}  ({hint})");
+                println!("MISSING  {}  ({})", req.name, req.hint);
                 bad += 1;
             }
         }
@@ -103,7 +102,7 @@ pub fn selftest() -> i32 {
     let plans = std::fs::read_dir(plan_root())
         .map(|d| d.filter_map(|e| e.ok()).count())
         .unwrap_or(0);
-    println!("ok       ~/Plan entries: {plans}");
+    println!("ok       {} entries: {plans}", plan_root().display());
     if bad > 0 {
         eprintln!("\n{bad} required binaries missing");
     }
@@ -131,8 +130,11 @@ pub fn cap_lines(s: &str, n: usize) -> String {
 
 /// Parse the repo path a PLAN.md declares, e.g. ``仓库目标位置：`/home/x/repo` ``.
 pub fn repo_from_plan(text: &str) -> Option<String> {
-    let re = Regex::new(r"(?:仓库目标位置|交付仓库|仓库位置)\s*[：:]\s*`([^`]+)`").ok()?;
+    let markers = &crate::config::cfg().plan.repo_markers;
+    let alt: Vec<String> = markers.iter().map(|m| regex::escape(m)).collect();
+    let re = Regex::new(&format!(r"(?:{})\s*[：:]\s*`([^`]+)`", alt.join("|"))).ok()?;
     let raw = re.captures(text)?.get(1)?.as_str().trim().to_string();
+
     if raw.starts_with('/') {
         return Some(raw);
     }
@@ -221,21 +223,8 @@ pub fn dir_bytes(p: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// `[limits]` from ~/.config/yt-dev/config.toml → (max_store_mb, keep_runs).
+/// `[limits]` from config.toml → (max_store_mb, keep_runs).
 pub fn config_limits() -> (u64, usize) {
-    let mut max_store_mb = 4096;
-    let mut keep_runs = 30;
-    if let Ok(t) = std::fs::read_to_string(config_dir().join("config.toml")) {
-        if let Ok(v) = t.parse::<toml::Value>() {
-            if let Some(l) = v.get("limits") {
-                if let Some(x) = l.get("max_store_mb").and_then(|x| x.as_integer()) {
-                    max_store_mb = x.max(0) as u64;
-                }
-                if let Some(x) = l.get("keep_runs").and_then(|x| x.as_integer()) {
-                    keep_runs = x.max(1) as usize;
-                }
-            }
-        }
-    }
-    (max_store_mb, keep_runs)
+    let l = &crate::config::cfg().limits;
+    (l.max_store_mb, l.keep_runs.max(1))
 }

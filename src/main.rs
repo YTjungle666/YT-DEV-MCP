@@ -4,6 +4,7 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
+mod config;
 mod plan;
 mod publish;
 mod tools;
@@ -12,6 +13,9 @@ mod worker;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--init-config") {
+        std::process::exit(config::init());
+    }
     if args.iter().any(|a| a == "--selftest") {
         std::process::exit(util::selftest());
     }
