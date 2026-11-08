@@ -44,10 +44,11 @@ pub fn schemas() -> Value {
         },
         {
             "name": "dev_worker",
-            "description": "codex worker 生命周期。一个 worker 只给计划的一个切片（scope），并行任务用 start_batch 各起独立 worktree；CPU/内存有硬上限，kill 只在显式调用时执行。",
+            "description": "codex worker 生命周期。一个 worker 只给计划的一个切片（scope），并行任务用 start_batch 各起独立 worktree；CPU/内存有硬上限，kill 只在显式调用时执行。给 cwd 即可在任意仓库跑，不需要 PLAN.md（此时 project 只作 run 目录名，可省）。",
             "inputSchema": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["start", "start_batch", "status", "list", "kill"]},
-                "project": {"type": "string"},
+                "path": {"type": "string", "description": "仓库目录绝对路径（能力层唯一入口，不需要 PLAN.md）"},
+                "label": {"type": "string", "description": "报告里的名字，缺省用目录名"},
                 "task": {"type": "string", "description": "这一个 worker 要做的事，越具体越好"},
                 "scope": {"type": "array", "items": {"type": "string"}, "description": "该 worker 负责的计划段落关键字（阶段标题），只把这部分拼进 prompt"},
                 "tasks": {"type": "array", "items": {"type": "object", "properties": {
@@ -64,45 +65,61 @@ pub fn schemas() -> Value {
         },
         {
             "name": "dev_review",
-            "description": "对 worker 的改动起独立 review（强模型线），返回 verdict 与按文件的问题清单。",
+            "description": "对 worker 的改动起独立 review（强模型线），返回 verdict 与按文件的问题清单。给 run_id、project 或 path 任一即可，不需要 PLAN.md。",
             "inputSchema": {"type": "object", "properties": {
                 "run_id": {"type": "string"},
                 "project": {"type": "string"},
+                "path": {"type": "string", "description": "仓库目录绝对路径；给了就不查 ~/Plan"},
                 "base": {"type": "string", "description": "对比基线，默认 run 的 base_commit 或 HEAD"}
             }}
         },
         {
             "name": "dev_gate",
-            "description": "按仓库形态跑门禁：cargo fmt/clippy/test 或 npm build/test 或 make verify，逐步返回通过/失败与输出尾部。",
+            "description": "按仓库形态跑门禁：cargo fmt/clippy/test 或 npm build/test 或 make verify，逐步返回通过/失败与输出尾部。给 project 或 path 任一即可，不需要 PLAN.md。",
             "inputSchema": {"type": "object", "properties": {
                 "project": {"type": "string"},
+                "path": {"type": "string", "description": "仓库目录绝对路径；给了就不查 ~/Plan"},
                 "scope": {"type": "string", "enum": ["fast", "full"], "default": "fast"},
                 "timeout_secs": {"type": "integer", "default": gate_timeout}
 
-            }, "required": ["project"]}
+            }}
         },
         {
             "name": "dev_release",
-            "description": "发布预检：版本一致性、变更摘要、隐私扫描(gitleaks)、依赖漏洞(osv-scanner/cargo audit)、tag 命令预览。默认 dry-run，从不执行发布。",
+            "description": "发布预检：版本一致性、变更摘要、隐私扫描(gitleaks)、依赖漏洞(osv-scanner/cargo audit)、tag 命令预览。默认 dry-run，从不执行发布。给 project 或 path 任一即可，不需要 PLAN.md。",
             "inputSchema": {"type": "object", "properties": {
                 "project": {"type": "string"},
+                "path": {"type": "string", "description": "仓库目录绝对路径；给了就不查 ~/Plan"},
                 "version": {"type": "string", "description": "目标版本，如 0.1.13"},
                 "deep": {"type": "boolean", "default": false, "description": "追加 cargo audit"},
                 "dry_run": {"type": "boolean", "default": true}
-            }, "required": ["project", "version"]}
+            }, "required": ["version"]}
         },
         {
             "name": "dev_publish",
-            "description": "上传 GitHub 并加保护规则。先校验：未提交改动、README 长度、LICENSE（默认 config.toml 的 [publish] license；派生自上游必须与上游同 license）、gitleaks 密钥扫描；通过后才 gh repo create/push，并给主干加保护（禁强推/禁删除、要求 ci 通过）。默认 dry-run。",
+            "description": "上传 GitHub 并加保护规则。先校验：未提交改动、README 长度、LICENSE（默认 config.toml 的 [publish] license；派生自上游必须与上游同 license）、gitleaks 密钥扫描；通过后才 gh repo create/push，并给主干加保护（禁强推/禁删除、要求 ci 通过）。默认 dry-run。给 project 或 path 任一即可，不需要 PLAN.md。",
             "inputSchema": {"type": "object", "properties": {
                 "project": {"type": "string"},
+                "path": {"type": "string", "description": "仓库目录绝对路径；给了就不查 ~/Plan"},
                 "repo": {"type": "string", "description": "owner/name，缺省用 origin remote 或 gh 用户名 + 目录名"},
                 "visibility": {"type": "string", "enum": ["public", "private"], "default": "public"},
                 "license": {"type": "string", "description": format!("缺省 {license}")},
 
                 "upstream": {"type": "string", "description": "派生来源 owner/name：自动对齐其 license"},
                 "dry_run": {"type": "boolean", "default": true}
-            }, "required": ["project"]}
+            }}
+        },
+        {
+            "name": "dev_flow",
+            "description": "PLAN 项目的规范流程（新项目走这条）：init / status / step / advance。阶段 plan→execute→review→gate→release→publish 顺序固定，状态读 PLAN.md 勾选、执行记录放 XDG，可断点续跑。只想用某一件时直接调 dev_gate / dev_review / dev_release / dev_publish / dev_worker 并给 path。",
+            "inputSchema": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["init", "status", "step", "advance"]},
+                "project": {"type": "string", "description": "~/Plan 下的目录名；省略时用 path 反查"},
+                "path": {"type": "string", "description": "仓库目录绝对路径（init 时写进 PLAN，反查项目时用）"},
+                "version": {"type": "string", "description": "release 阶段的目标版本，缺省取 PLAN 状态行"},
+                "apply": {"type": "boolean", "default": false, "description": "publish 阶段真推送；默认只预览"},
+                "once": {"type": "boolean", "default": false, "description": "advance 只推进一步"}
+            }, "required": ["action"]}
         }
     ])
 }
@@ -122,6 +139,7 @@ pub fn call(params: &Value) -> Result<Value, (i32, String)> {
         "dev_gate" => gate(&a),
         "dev_release" => release(&a),
         "dev_publish" => crate::publish::run_publish(&a),
+        "dev_flow" => crate::flow::run_action(&a),
         other => Err(format!("unknown tool {other}")),
     };
     Ok(match out {
@@ -155,6 +173,34 @@ pub(crate) fn repo_of(project: &str) -> Option<PathBuf> {
     guess.is_dir().then_some(guess)
 }
 
+/// 能力层唯一入口：仓库绝对路径（`~/` 展开，必须是已存在目录）。
+/// 不认识 project —— 那是编排层的事。
+pub(crate) fn repo_path(a: &Value) -> Result<PathBuf, String> {
+    let raw = a["path"].as_str().unwrap_or("").trim();
+    if raw.is_empty() {
+        return Err(
+            "需要 path（仓库绝对路径）；PLAN 项目先用 dev_projects 查 path，或走 dev_flow".into(),
+        );
+    }
+    let p = match raw.strip_prefix("~/") {
+        Some(rest) => home().join(rest),
+        None => PathBuf::from(raw),
+    };
+    if !p.is_dir() {
+        return Err(format!("path 不是目录: {}", p.display()));
+    }
+    Ok(p)
+}
+
+/// 报告里用的名字：`label` 显式给，否则用目录名。
+pub(crate) fn label_of(a: &Value, repo: &Path) -> String {
+    a["label"]
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| repo.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| repo.display().to_string())
+}
+
 fn plan_path_of(project: &str) -> Option<PathBuf> {
     plan::plan_path(project)
 }
@@ -162,10 +208,14 @@ fn plan_path_of(project: &str) -> Option<PathBuf> {
 fn projects() -> Result<String, String> {
     let mut rows = Vec::new();
     let mut unknown = Vec::new();
-    let mut active: Vec<(String, String)> = Vec::new();
+    let mut active: Vec<(String, String, String)> = Vec::new(); // (run id, project, repo)
     for (id, meta) in all_runs() {
-        if meta["status"] == json!("running") {
-            active.push((id, meta["project"].as_str().unwrap_or("-").to_string()));
+        if crate::util::pid_alive(meta["pid"].as_i64().unwrap_or(0)) {
+            active.push((
+                id,
+                meta["project"].as_str().unwrap_or("").to_string(),
+                meta["repo"].as_str().unwrap_or("").to_string(),
+            ));
         }
     }
     for p in plan::list_projects() {
@@ -201,8 +251,8 @@ fn projects() -> Result<String, String> {
         };
         let running: Vec<&str> = active
             .iter()
-            .filter(|(_, pr)| pr == &p)
-            .map(|(id, _)| id.as_str())
+            .filter(|(_, pr, rr)| pr == &p || (!rr.is_empty() && rr == &repo))
+            .map(|(id, _, _)| id.as_str())
             .collect();
         let gitcol = if branch == "-" {
             "-".to_string()
@@ -260,7 +310,7 @@ fn toml_version(t: &str) -> Option<String> {
 
 pub const DEFAULT_REVIEW_PROMPT: &str = include_str!("../assets/review-prompt.md");
 
-fn review(a: &Value) -> Result<String, String> {
+pub(crate) fn review(a: &Value) -> Result<String, String> {
     let (repo, base, task) = if let Some(id) = a["run_id"].as_str() {
         let (_, m) = all_runs()
             .into_iter()
@@ -272,18 +322,16 @@ fn review(a: &Value) -> Result<String, String> {
             m["task"].as_str().unwrap_or("").to_string(),
         )
     } else {
-        let p = a["project"]
-            .as_str()
-            .ok_or("review needs run_id or project")?;
+        let repo = repo_path(a)?;
         (
-            repo_of(p).ok_or(format!("cannot resolve repo for {p}"))?,
+            repo,
             a["base"].as_str().unwrap_or("HEAD").to_string(),
             String::new(),
         )
     };
-    let rc = &cfg().review;
-    let tpl =
-        std::fs::read_to_string(&cfg().paths.review_prompt).unwrap_or_else(|_| rc.prompt.clone());
+    let c = crate::config::cfg_for(&repo);
+    let rc = &c.review;
+    let tpl = std::fs::read_to_string(&c.paths.review_prompt).unwrap_or_else(|_| rc.prompt.clone());
     let prompt = tpl.replace("{base}", &base).replace("{task}", &task);
     let out_file = std::env::temp_dir().join(format!("yt-dev-review-{}.json", epoch()));
     let out_s = out_file.to_string_lossy().into_owned();
@@ -311,7 +359,7 @@ fn review(a: &Value) -> Result<String, String> {
                 v["verdict"].as_str().unwrap_or("?"),
                 findings.len()
             );
-            for f in findings.iter().take(cfg().limits.max_items) {
+            for f in findings.iter().take(c.limits.max_items) {
                 s.push_str(&format!(
                     "- [{}] {}:{} {}\n  → {}\n",
                     f["severity"].as_str().unwrap_or("?"),
@@ -332,14 +380,15 @@ fn review(a: &Value) -> Result<String, String> {
 
 // -------------------------------------------------------------------- gate
 
-fn gate(a: &Value) -> Result<String, String> {
-    let project = a["project"].as_str().ok_or("gate needs project")?;
-    let repo = repo_of(project).ok_or(format!("cannot resolve repo for {project}"))?;
+pub(crate) fn gate(a: &Value) -> Result<String, String> {
+    let repo = repo_path(a)?;
+    let c = crate::config::cfg_for(&repo);
+    let project = label_of(a, &repo);
     let full = a["scope"].as_str() == Some("full");
     let timeout = a["timeout_secs"]
         .as_u64()
-        .unwrap_or(cfg().limits.gate_timeout_secs);
-    let steps = gate_steps(&repo, project, full);
+        .unwrap_or(c.limits.gate_timeout_secs);
+    let steps = gate_steps(&repo, &c.gate, &project, full);
     if steps.is_empty() {
         return Err(format!(
             "no gate matched {} —— 在 {} 的 [gate.profiles] 或 [gate.overrides.\"{project}\"] 里加",
@@ -392,8 +441,12 @@ fn steps_len(failed: &i32, report: &str) -> usize {
 /// 门禁步骤来自配置：先看 `[gate.overrides.<project>]`，否则按顺序取第一个命中
 /// `detect` 文件的 profile。`full_only` 只在 scope=full 时跑，`needs` 要求命中
 /// 文件里出现那段字样（如 package.json 有没有 "test"）。
-fn gate_steps(repo: &Path, project: &str, full: bool) -> Vec<(String, Vec<String>)> {
-    let g = &cfg().gate;
+fn gate_steps(
+    repo: &Path,
+    g: &crate::config::Gate,
+    project: &str,
+    full: bool,
+) -> Vec<(String, Vec<String>)> {
     let (steps, hay) = if let Some(ov) = g.overrides.get(project) {
         (ov.as_slice(), String::new())
     } else {
@@ -456,15 +509,16 @@ fn cargo_profile_hints(repo: &Path) -> Vec<String> {
 
 // ----------------------------------------------------------------- release
 
-fn release(a: &Value) -> Result<String, String> {
-    let project = a["project"].as_str().ok_or("release needs project")?;
+pub(crate) fn release(a: &Value) -> Result<String, String> {
     let version = a["version"]
         .as_str()
         .ok_or("release needs version")?
         .trim_start_matches('v')
         .to_string();
     let deep = a["deep"].as_bool().unwrap_or(false);
-    let repo = repo_of(project).ok_or(format!("cannot resolve repo for {project}"))?;
+    let repo = repo_path(a)?;
+    let c = crate::config::cfg_for(&repo);
+    let project = label_of(a, &repo);
     let mut blockers: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
@@ -499,29 +553,37 @@ fn release(a: &Value) -> Result<String, String> {
     if versions.is_empty() {
         warnings.push("no version file found (Cargo.toml/package.json)".into());
     }
-    if let Some(pp) = plan::plan_path(project) {
-        let text = std::fs::read_to_string(&pp).unwrap_or_default();
-        if !text.contains(&version) {
-            warnings.push(format!("PLAN.md 状态行未提到 {version}"));
+    if let Some(p) = plan::project_for_repo(&repo) {
+        if let Some(pp) = plan::plan_path(&p) {
+            let text = std::fs::read_to_string(&pp).unwrap_or_default();
+            if !text.contains(&version) {
+                warnings.push(format!("PLAN.md 状态行未提到 {version}"));
+            }
         }
     }
 
     // 2. changelog draft
-    let last_tag = git(&repo, &["describe", "--tags", "--abbrev=0"]);
+    // 没 tag 的仓库 describe 会失败并把中文错误塞进 stdout——按状态判断，别拿错误当 tag。
+    let tag_out = run("git", &["describe", "--tags", "--abbrev=0"], Some(&repo));
+    let last_tag = if tag_out.status.success() {
+        out_str(&tag_out).trim().to_string()
+    } else {
+        String::new()
+    };
     let range = if last_tag.is_empty() {
         "HEAD".to_string()
     } else {
         format!("{last_tag}..HEAD")
     };
     let log = git(&repo, &["log", "--oneline", &range]);
-    let max = cfg().limits.max_items;
+    let max = c.limits.max_items;
     let commits: Vec<&str> = log.lines().take(max).collect();
     // 3. secrets
     let mut secret_lines = Vec::new();
     if let Some(bin) = which("gitleaks") {
         let tmp = std::env::temp_dir().join(format!("yt-dev-gl-{}.json", epoch()));
-        let gl_cfg = cfg().paths.gitleaks_config.clone();
-        let max_mb = cfg().limits.gitleaks_max_mb.to_string();
+        let gl_cfg = c.paths.gitleaks_config.clone();
+        let max_mb = c.limits.gitleaks_max_mb.to_string();
         let mut args = vec![
             "dir",
             repo.to_str().unwrap_or("."),
@@ -653,18 +715,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn repo_path_requires_an_existing_directory() {
+        let dir = std::env::temp_dir().join("yt-dev-repo-path-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let abs = dir.to_str().unwrap().to_string();
+        assert_eq!(repo_path(&json!({"path": abs})).unwrap(), dir);
+        assert!(repo_path(&json!({"path": "~/definitely-not-a-repo-xyz"})).is_err());
+        assert!(repo_path(&json!({"path": "  "})).is_err());
+        assert!(repo_path(&json!({})).is_err());
+        // label defaults to the directory name
+        assert_eq!(label_of(&json!({}), &dir), "yt-dev-repo-path-test");
+        assert_eq!(label_of(&json!({"label": "x"}), &dir), "x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn gate_steps_come_from_config_and_honour_full_only() {
         let dir = std::env::temp_dir().join("yt-dev-gate-steps-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
-        let fast = gate_steps(&dir, "yt-dev-gate-probe", false);
+        let fast = gate_steps(
+            &dir,
+            &crate::config::Gate::default(),
+            "yt-dev-gate-probe",
+            false,
+        );
         assert!(
             fast.iter().any(|(n, _)| n == "fmt"),
             "默认应有 rust profile"
         );
         assert!(!fast.iter().any(|(n, _)| n == "build-release"));
-        let full = gate_steps(&dir, "yt-dev-gate-probe", true);
+        let full = gate_steps(
+            &dir,
+            &crate::config::Gate::default(),
+            "yt-dev-gate-probe",
+            true,
+        );
         assert!(full.iter().any(|(n, _)| n == "build-release"));
         let _ = std::fs::remove_dir_all(&dir);
     }

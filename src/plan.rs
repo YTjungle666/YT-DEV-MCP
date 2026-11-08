@@ -192,6 +192,29 @@ fn phase_json(title: &str, items: &[Value]) -> Value {
     json!({"title": title, "done": done, "total": checkable.len(), "steps": items.len(), "items": items})
 }
 
+/// 反查：哪个 `~/Plan/<项目>/PLAN.md` 声明了这个仓库（规范化路径比较）。
+pub fn project_for_repo(repo: &std::path::Path) -> Option<String> {
+    let canon = std::fs::canonicalize(repo).ok()?;
+    let rd = std::fs::read_dir(crate::util::plan_root()).ok()?;
+    for d in rd.filter_map(|e| e.ok()) {
+        if !d.path().is_dir() {
+            continue;
+        }
+        let name = d.file_name().to_string_lossy().into_owned();
+        let Some(p) = plan_path(&name) else { continue };
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let Some(decl) = crate::util::repo_from_plan(&text) else {
+            continue;
+        };
+        if std::fs::canonicalize(&decl).ok().as_deref() == Some(canon.as_path()) {
+            return Some(name);
+        }
+    }
+    None
+}
+
 pub fn describe(project: &str) -> Result<Value, String> {
     let p = plan_path(project)
         .ok_or_else(|| format!("no PLAN.md under {}", plan_root().join(project).display()))?;

@@ -1,0 +1,19 @@
+name: yt-dev-nudge
+version: 0.3.0
+manifest_version: 2
+api_version: 1
+description: >-
+  Injects a one-line routing nudge on the first turn of each session, and every
+  N turns after that, so coding work actually goes through the local yt-dev MCP
+  (dev_projects / dev_plan / dev_worker / dev_review) instead of being rebuilt
+  by hand.
+author: YT (local)
+license: MIT
+requires_hermes: ">=0.22"
+provides_hooks:
+  - pre_llm_call
+config_schema:
+  reinject_every_n:
+    type: int
+    default: 10
+    description: 每 N 轮重注入一次提示；0 = 只注入首轮。

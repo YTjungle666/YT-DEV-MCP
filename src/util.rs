@@ -151,40 +151,76 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
 
 // ------------------------------------------------------------ workflows
 
-pub fn runs_dir(project: &str) -> PathBuf {
-    plan_root().join(project).join("runs")
+/// `$XDG_STATE_HOME/yt-dev`，否则 `~/.local/state/yt-dev`。能力层产物只落这里，
+/// 与 ~/Plan 无关，所以对任意仓库都能用。
+pub fn state_root() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".local/state"))
+        .join("yt-dev")
 }
 
-/// All run records, newest first.
+/// 仓库的稳定短 id（FNV-1a 16 hex，规范化绝对路径）；不引依赖，跨进程稳定。
+pub fn repo_id(repo: &Path) -> String {
+    let canon = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in canon.to_string_lossy().as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+pub fn repo_state_dir(repo: &Path) -> PathBuf {
+    state_root().join(repo_id(repo))
+}
+
+/// 一个仓库的产物目录：runs/ + actions/ + meta.json。
+pub fn runs_dir_for(repo: &Path) -> PathBuf {
+    repo_state_dir(repo).join("runs")
+}
+
+/// 所有 run 记录（跨仓库），按 started 倒序。
 pub fn all_runs() -> Vec<(String, serde_json::Value)> {
     let mut out = Vec::new();
-    let Ok(dirs) = std::fs::read_dir(plan_root()) else {
+    let Ok(dirs) = std::fs::read_dir(state_root()) else {
         return out;
     };
     for d in dirs.filter_map(|e| e.ok()) {
-        let rd = d.path().join("runs");
-        let Ok(files) = std::fs::read_dir(&rd) else {
-            continue;
-        };
-        for f in files.filter_map(|e| e.ok()) {
-            let path = f.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("json") {
-                continue;
-            }
-            if let Ok(t) = std::fs::read_to_string(&path) {
-                if let Ok(v) = serde_json::from_str(&t) {
-                    let id = path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    out.push((id, v));
-                }
-            }
-        }
+        collect_runs(&d.path().join("runs"), &mut out);
     }
     out.sort_by_key(|(_, v)| -v["started"].as_i64().unwrap_or(0));
     out
+}
+
+/// 单个仓库的 run 记录。
+pub fn runs_of(repo: &Path) -> Vec<(String, serde_json::Value)> {
+    let mut out = Vec::new();
+    collect_runs(&runs_dir_for(repo), &mut out);
+    out.sort_by_key(|(_, v)| -v["started"].as_i64().unwrap_or(0));
+    out
+}
+
+fn collect_runs(rd: &Path, out: &mut Vec<(String, serde_json::Value)>) {
+    let Ok(files) = std::fs::read_dir(rd) else {
+        return;
+    };
+    for f in files.filter_map(|e| e.ok()) {
+        let path = f.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(t) = std::fs::read_to_string(&path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
+                let id = path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                out.push((id, v));
+            }
+        }
+    }
 }
 
 pub fn pid_alive(pid: i64) -> bool {
@@ -224,7 +260,7 @@ pub fn dir_bytes(p: &Path) -> u64 {
 }
 
 /// `[limits]` from config.toml → (max_store_mb, keep_runs).
-pub fn config_limits() -> (u64, usize) {
-    let l = &crate::config::cfg().limits;
-    (l.max_store_mb, l.keep_runs.max(1))
+/// 仓库级 limits（`<repo>/.yt-dev.toml` 可覆盖）。
+pub fn config_limits_for(c: &crate::config::Config) -> (u64, usize) {
+    (c.limits.max_store_mb, c.limits.keep_runs.max(1))
 }

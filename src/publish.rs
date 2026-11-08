@@ -1,8 +1,6 @@
 //! GitHub publishing with the house rules baked in: license default, derived-code
 //! license match, README requirement, secret scan gate, branch protection.
 
-use crate::config::cfg;
-use crate::tools::repo_of;
 use crate::util::{cap_lines, epoch, git, out_str, redact, run, which};
 use serde_json::{json, Value};
 
@@ -11,9 +9,9 @@ const LICENSE_TEXT: &str = include_str!("../assets/PolyForm-Noncommercial-1.0.0.
 const CI_YML: &str = include_str!("../assets/ci.yml");
 
 pub fn run_publish(a: &Value) -> Result<String, String> {
-    let c = cfg();
-    let project = a["project"].as_str().ok_or("publish needs project")?;
-    let repo_dir = repo_of(project).ok_or(format!("cannot resolve repo for {project}"))?;
+    let repo_dir = crate::tools::repo_path(a)?;
+    let c = crate::config::cfg_for(&repo_dir);
+    let project = crate::tools::label_of(a, &repo_dir);
     if which("gh").is_none() {
         return Err("gh not on PATH".into());
     }

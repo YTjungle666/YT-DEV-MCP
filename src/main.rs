@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 
 mod config;
+mod flow;
 mod plan;
 mod publish;
 mod tools;

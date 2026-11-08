@@ -421,6 +421,67 @@ pub fn reset() {
     *CFG.write().unwrap() = None;
 }
 
+// ------------------------------------------------------- repo-level overlay
+
+/// 仓库级配置文件名：`<repo>/.yt-dev.toml`。优先级 仓库 > 用户 config > 内置默认。
+pub const REPO_FILE: &str = ".yt-dev.toml";
+
+/// 任何层级都不开放的键；写了也不生效，只在 stderr 留一行。
+const FORBIDDEN: [(&str, &str); 4] = [
+    ("publish", "allow_force_pushes"),
+    ("publish", "allow_deletions"),
+    ("publish", "skip_secret_scan"),
+    ("gate", "skip"),
+];
+
+/// 生效配置：用户级 + `<repo>/.yt-dev.toml` 覆盖。能力层每个入口都走这里，
+/// 所以同一个仓库用自己的门禁/发布策略，不必登记到用户 config。
+pub fn cfg_for(repo: &Path) -> Config {
+    let base = cfg().clone();
+    let f = repo.join(REPO_FILE);
+    let Ok(text) = std::fs::read_to_string(&f) else {
+        return base;
+    };
+    if let Ok(v) = text.parse::<toml::Value>() {
+        for (sec, key) in FORBIDDEN {
+            if v.get(sec).and_then(|t| t.get(key)).is_some() {
+                eprintln!("yt-dev: {} 的 {sec}.{key} 不开放，已忽略", f.display());
+            }
+        }
+    }
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct Overlay {
+        gate: Option<Gate>,
+        publish: Option<Publish>,
+        worker: Option<Worker>,
+        limits: Option<Limits>,
+    }
+    match toml::from_str::<Overlay>(&text) {
+        Ok(o) => {
+            let mut c = base;
+            if let Some(g) = o.gate {
+                c.gate = g;
+            }
+            if let Some(p) = o.publish {
+                c.publish = p;
+            }
+            if let Some(w) = o.worker {
+                c.worker = w;
+            }
+            if let Some(l) = o.limits {
+                c.limits = l;
+            }
+            c.paths.expand();
+            c
+        }
+        Err(e) => {
+            eprintln!("yt-dev: {} 解析失败，忽略仓库级覆盖: {e}", f.display());
+            base
+        }
+    }
+}
+
 /// `--init-config`：不覆盖已有文件。
 pub fn init() -> i32 {
     let f = file();

@@ -3,14 +3,13 @@
 
 use crate::config::cfg;
 use crate::plan;
-use crate::tools::repo_of;
 use crate::util::{
-    all_runs, cap1, cap_lines, config_limits, dir_bytes, epoch, git, out_str, pid_alive,
-    proc_stats, run, runs_dir, which,
+    all_runs, cap1, cap_lines, config_limits_for, dir_bytes, epoch, git, out_str, pid_alive,
+    proc_stats, run, runs_dir_for, which,
 };
 use serde_json::{json, Value};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const MB: u64 = 1024 * 1024;
@@ -42,11 +41,13 @@ fn start_batch(a: &Value) -> Result<String, String> {
     if tasks.is_empty() {
         return Err("start_batch: empty tasks".into());
     }
-    if tasks.len() > cfg().limits.max_parallel {
+    let repo = crate::tools::repo_path(a)?;
+    let c = crate::config::cfg_for(&repo);
+    if tasks.len() > c.limits.max_parallel {
         return Err(format!(
             "start_batch: {} tasks > hard limit {} (split into waves)",
             tasks.len(),
-            cfg().limits.max_parallel
+            c.limits.max_parallel
         ));
     }
     let mut lines = Vec::new();
@@ -66,8 +67,12 @@ fn start_batch(a: &Value) -> Result<String, String> {
 }
 
 fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
-    let project = a["project"].as_str().ok_or("start needs project")?;
     let task = a["task"].as_str().ok_or("start needs task")?;
+    let repo = crate::tools::repo_path(a)?;
+    let c = crate::config::cfg_for(&repo);
+    let name = crate::tools::label_of(a, &repo);
+    // 有 PLAN.md 声明了这个仓库就顺带切片；没有也不报错。
+    let project = plan::project_for_repo(&repo);
     let scopes: Vec<String> = a["scope"]
         .as_array()
         .map(|v| {
@@ -76,15 +81,9 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
                 .collect()
         })
         .unwrap_or_default();
-    let repo = match a["cwd"].as_str() {
-        Some(c) => PathBuf::from(c),
-        None => {
-            repo_of(project).ok_or("cannot resolve repo (add ~/.config/yt-dev/projects.toml)")?
-        }
-    };
     // Everything this tool writes (run logs, run meta, worktrees) lives under a
     // user-settable cap; prune before growing, never rely on free disk.
-    let (max_store_mb, keep_runs) = config_limits();
+    let (max_store_mb, keep_runs) = config_limits_for(&c);
     let max_store_mb = a["max_store_mb"].as_u64().unwrap_or(max_store_mb);
     let (before, after, pruned) = prune_store(max_store_mb, keep_runs);
     if after > max_store_mb * MB {
@@ -97,19 +96,19 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
         ));
     }
     let _ = git(&repo, &["worktree", "prune"]);
-    let mem_mb = a["mem_mb"].as_u64().unwrap_or(cfg().limits.mem_mb);
-    let cpu_pct = a["cpu_pct"].as_u64().unwrap_or(cfg().limits.cpu_pct as u64) as u32;
+    let mem_mb = a["mem_mb"].as_u64().unwrap_or(c.limits.mem_mb);
+    let cpu_pct = a["cpu_pct"].as_u64().unwrap_or(c.limits.cpu_pct as u64) as u32;
 
     let want_wt = a["worktree"].as_bool().unwrap_or(false) || a["action"] == json!("start_batch");
 
     let id = crate::util::stamp();
-    let dir = runs_dir(project);
+    let dir = runs_dir_for(&repo);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     // Parallel workers must not share a working tree.
     let (cwd, branch) = if want_wt && repo.join(".git").exists() {
         let wt = worktree_root().join(&id);
-        let br = format!("{}{id}", cfg().worker.branch_prefix);
+        let br = format!("{}{id}", c.worker.branch_prefix);
 
         if let Some(p) = wt.parent() {
             std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
@@ -137,18 +136,33 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
         (repo.clone(), String::new())
     };
 
-    let slice = plan::slice(project, &scopes).unwrap_or_else(|e| format!("(切片失败: {e})"));
-    let plan_path = plan::plan_path(project)
+    let slice = match project.as_deref() {
+        Some(p) => plan::slice(p, &scopes)
+            .unwrap_or_else(|_| "（计划里没找到对应段落：按任务描述执行，范围自限）".to_string()),
+        None => "（没有 PLAN.md：按任务描述执行，范围自限）".to_string(),
+    };
+    let plan_path = project
+        .as_deref()
+        .and_then(plan::plan_path)
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    let prompt = build_prompt(&plan_path, project, task, &scopes, &slice, mem_mb, cpu_pct);
+    let prompt = build_prompt(PromptIn {
+        c: &c,
+        plan_path: &plan_path,
+        project: &name,
+        task,
+        scopes: &scopes,
+        slice: &slice,
+        mem_mb,
+        cpu_pct,
+    });
 
     let log_path = dir.join(format!("{id}.log"));
     let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
     let base = git(&cwd, &["rev-parse", "HEAD"]);
 
-    let mut cmd = capped_command(mem_mb, cpu_pct)?;
-    cmd.args(&cfg().worker.args)
+    let mut cmd = capped_command(&c, mem_mb, cpu_pct)?;
+    cmd.args(&c.worker.args)
         .arg(&prompt)
         .current_dir(&cwd)
         .stdin(Stdio::null())
@@ -170,16 +184,22 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
     };
 
     let meta = json!({
-        "id": s.id, "project": project, "label": label, "task": task, "scope": scopes,
+        "id": s.id, "repo": repo.display().to_string(), "name": name, "project": project,
+        "label": label, "task": task, "scope": scopes,
         "cwd": s.cwd.display().to_string(), "branch": if s.branch.is_empty() { Value::Null } else { json!(s.branch) },
         "base_commit": base, "pid": s.pid, "started": epoch(),
-        "mem_mb": mem_mb, "cpu_pct": cpu_pct, "log": log_path.display().to_string()
+        "mem_mb": mem_mb, "cpu_pct": cpu_pct, "log": log_path.display().to_string(),
+        "dir": dir.display().to_string()
     });
     std::fs::write(
         dir.join(format!("{id}.json")),
         serde_json::to_string_pretty(&meta).unwrap(),
     )
     .map_err(|e| e.to_string())?;
+    // 计划项目的人在 ~/Plan/<项目>/runs 里也能翻到（软链，内容只有一份）。
+    if let Some(p) = &project {
+        mirror_runs_link(p, &dir);
+    }
     Ok(format!(
         "started {id} pid {} mem {mem_mb}MB cpu {cpu_pct}%{}\n  cwd {}\n  log {}\n  store {}MB → {}MB / cap {}MB{}",
         s.pid,
@@ -201,9 +221,18 @@ fn start_one(a: &Value, label: Option<&str>) -> Result<String, String> {
     ))
 }
 
+/// `~/Plan/<项目>/runs` 指向 XDG 里的同一份产物；已有目录（老数据）就不动。
+fn mirror_runs_link(project: &str, dir: &Path) {
+    let link = crate::util::plan_root().join(project).join("runs");
+    if link.exists() {
+        return;
+    }
+    let _ = std::os::unix::fs::symlink(dir, &link);
+}
+
 /// systemd-run --user --scope gives hard MemoryMax/CPUQuota without a root helper.
-fn capped_command(mem_mb: u64, cpu_pct: u32) -> Result<Command, String> {
-    let w = &cfg().worker;
+fn capped_command(c: &crate::config::Config, mem_mb: u64, cpu_pct: u32) -> Result<Command, String> {
+    let w = &c.worker;
     let bin = which(&w.bin).ok_or_else(|| format!("{} not on PATH", w.bin))?;
     let nice = w.nice.to_string();
     let sd = which("systemd-run");
@@ -238,16 +267,11 @@ fn capped_command(mem_mb: u64, cpu_pct: u32) -> Result<Command, String> {
     Ok(c)
 }
 
-/// Everything this tool owns on disk: per-project runs/ dirs plus worktrees.
+/// Everything this tool owns on disk: the XDG state tree plus worktrees.
 fn store_roots() -> Vec<PathBuf> {
     let mut v = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(crate::util::plan_root()) {
-        for d in rd.filter_map(|e| e.ok()) {
-            let r = d.path().join("runs");
-            if r.is_dir() {
-                v.push(r);
-            }
-        }
+    if crate::util::state_root().is_dir() {
+        v.push(crate::util::state_root());
     }
     let wt = worktree_root();
     if wt.is_dir() {
@@ -261,7 +285,15 @@ fn store_bytes() -> u64 {
 }
 
 fn remove_run_files(id: &str, m: &Value, removed: &mut Vec<String>) -> u64 {
-    let dir = runs_dir(m["project"].as_str().unwrap_or(""));
+    let dir = m["dir"]
+        .as_str()
+        .map(PathBuf::from)
+        .or_else(|| {
+            m["repo"]
+                .as_str()
+                .map(|r| crate::util::runs_dir_for(Path::new(r)))
+        })
+        .unwrap_or_default();
     let mut freed = 0;
     for name in [format!("{id}.log"), format!("{id}.json")] {
         let p = dir.join(name);
@@ -366,7 +398,7 @@ fn status(a: &Value) -> Result<String, String> {
     let children = if alive { git_children(pid) } else { 0 };
     let stalled = alive && idle.unwrap_or(0) > cfg().limits.stall_secs && children == 0;
     let disk = out_str(&run("du", &["-sh", cwd.to_str().unwrap_or(".")], None));
-    let (cap_mb, _) = config_limits();
+    let (cap_mb, _) = config_limits_for(cfg());
     let tail = std::fs::read_to_string(&log)
         .map(|t| cap_lines(&t, cfg().limits.log_tail_lines))
         .unwrap_or_default();
@@ -448,18 +480,31 @@ extern "C" {
     fn setsid() -> i32;
 }
 
-fn build_prompt(
-    plan_path: &str,
-    project: &str,
-    task: &str,
-    scopes: &[String],
-    slice: &str,
+/// 渲染 worker prompt 需要的全部输入；参数多了就打包，别让签名继续长。
+struct PromptIn<'a> {
+    c: &'a crate::config::Config,
+    plan_path: &'a str,
+    project: &'a str,
+    task: &'a str,
+    scopes: &'a [String],
+    slice: &'a str,
     mem_mb: u64,
     cpu_pct: u32,
-) -> String {
-    let w = &cfg().worker;
-    let tpl =
-        std::fs::read_to_string(&cfg().paths.worker_prompt).unwrap_or_else(|_| w.prompt.clone());
+}
+
+fn build_prompt(inp: PromptIn<'_>) -> String {
+    let PromptIn {
+        c,
+        plan_path,
+        project,
+        task,
+        scopes,
+        slice,
+        mem_mb,
+        cpu_pct,
+    } = inp;
+    let w = &c.worker;
+    let tpl = std::fs::read_to_string(&c.paths.worker_prompt).unwrap_or_else(|_| w.prompt.clone());
     let scope = if scopes.is_empty() {
         "（未指定：只做任务描述里明确的那部分）".to_string()
     } else {
@@ -490,12 +535,13 @@ fn render_rules(rules: &[String]) -> String {
 }
 
 /// worker 的硬约束条目（config `[worker] rules` 覆盖）；`{…}` 占位符同样会被替换。
-pub const DEFAULT_RULES: [&str; 11] = [
+pub const DEFAULT_RULES: [&str; 12] = [
     "只执行，不提问；歧义按片段里的决策取舍。范围外的文件一律不碰，确需改动先写进最后的说明里而不是直接改。",
     "不硬编码：路径、端口、超时、上限、命令、模型名、外部 URL 都从配置文件或参数读，并给默认值与示例；代码里不留只有本机才成立的常量。",
     "可扩展：多一种实现、多一种来源、多一个可调项，只加配置或新模块，不改既有调用方；也不为“以后可能用到”提前抽象。",
     "模块化：一个文件一个职责；新逻辑放独立模块，不往大文件里继续堆；单文件超过 {max_file_lines} 行或函数超过 {max_fn_lines} 行就拆。",
     "资源上限：本进程 MemoryMax={mem_mb}M、CPUQuota={cpu_pct}%；不要起常驻进程，不要跑全量基准，不要下载大文件。",
+    "取舍顺序：功能 > 性能 > 资源占用（CPU/内存/硬盘）。先把功能做对做全，再优化热路径与分配，最后压常驻 CPU/内存/磁盘；代码复杂度不算约束，不为“简洁”牺牲上面三项，重构同此。",
     "性能优先：先看复杂度，避免 O(n²) 和每请求分配；复用仓库已有实现，不新造轮子；性能与可读性冲突时选性能，并注释说明。",
     "不 push、不打 tag、不改 PLAN.md。",
     "门禁必须干净：fmt 无差异、clippy 与构建零 warning、测试零失败、零 error。任何 warning 都算没做完，不许用 #[allow]、-A、删测试或注释掉代码压过去；确实要留的例外写进最后说明交 YT 定。",
@@ -519,23 +565,27 @@ mod tests {
         assert!(all.contains("可扩展"), "少了可扩展约束");
         assert!(all.contains("{max_file_lines}"), "行数上限要走占位符");
         assert!(all.contains("零 warning"), "少了零警告门禁约束");
+        assert!(all.contains("功能 > 性能 > 资源占用"), "少了取舍顺序约束");
         assert!(DEFAULT_PROMPT.contains("{rules}"), "模板没接上 rules");
     }
 
     #[test]
     fn prune_drops_oldest_runs_until_under_cap() {
+        // runs 现在按仓库落在 XDG state 下：一个 hash 目录 = 一个仓库。
         let tmp = std::env::temp_dir().join("yt-dev-prune-test");
         let _ = std::fs::remove_dir_all(&tmp);
-        let runs = tmp.join("Plan/p/runs");
+        let runs = tmp.join("yt-dev/0123456789abcdef").join("runs");
         std::fs::create_dir_all(&runs).unwrap();
-        std::env::set_var("HOME", &tmp);
+        std::env::set_var("XDG_STATE_HOME", &tmp);
         crate::config::reset();
 
         for i in 0..3 {
             let id = format!("100{i}-000000");
             std::fs::write(
                 runs.join(format!("{id}.json")),
-                json!({"id": id, "project": "p", "pid": 0, "started": 1000 + i, "status": "finished"}).to_string(),
+                json!({"id": id, "repo": "/tmp/r", "pid": 0, "started": 1000 + i,
+                       "dir": runs.display().to_string()})
+                .to_string(),
             )
             .unwrap();
             std::fs::write(runs.join(format!("{id}.log")), "x".repeat(400_000)).unwrap();
@@ -545,7 +595,7 @@ mod tests {
         assert!(after <= MB, "after={after}");
         assert!(!removed.is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
-        std::env::remove_var("HOME");
+        std::env::remove_var("XDG_STATE_HOME");
         crate::config::reset();
     }
 }

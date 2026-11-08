@@ -1,29 +1,46 @@
 # YT-DEV-MCP
 
-个人代码工作流的 MCP server（stdio、单二进制、无异步运行时）。把 `~/Plan/<project>/PLAN.md`、codex worker 调度、独立评审/门禁、发布前隐私与依赖漏洞扫描固定成 8 个工具，让「计划 → 分工执行 → 收口 → 发版」这条链不用每次手搓命令。
+个人代码工作流的 MCP server（stdio、单二进制、无异步运行时）。分两层：**能力层**（门禁、评审、发版预检、上传、codex worker）每个都能对任意 git 仓库单独用，只要给仓库路径；**编排层**（计划、状态回写、`dev_flow`）在有 `~/Plan/<project>/PLAN.md` 时把这条「计划 → 分工执行 → 收口 → 发版」串成固定流程。
 
 ## 工具
 
+能力层（输入是仓库路径 `path`，不读 PLAN.md，不需要登记项目）：
+
 | 工具 | 作用 |
 |---|---|
-| `dev_projects` | 全局视图：每个项目的状态行、分支/脏文件/未推提交、活跃 worker |
-| `dev_plan` | 把 PLAN.md 解析成结构化状态（状态行、决策表、阶段进度、待办、下一步） |
-| `dev_plan_update` | 定点写回计划：改状态行 / 勾一个步骤 / 追加 run 记录，返回 diff，匹配不唯一即拒写 |
-| `dev_worker` | codex worker 生命周期：`start` / `start_batch` / `status` / `list` / `kill` |
-| `dev_review` | 独立评审（强模型线），只看 diff，输出 JSON verdict + findings |
-| `dev_gate` | 按仓库形态跑 fmt / clippy / test / build / make verify |
+| `dev_gate` | 按仓库形态跑 fmt / clippy / test / build / make verify（仓库可用 `.yt-dev.toml` 自带步骤） |
+| `dev_review` | 独立评审（强模型线），只看 diff，输出 verdict + findings |
 | `dev_release` | 发布预检：版本一致性、变更摘要、gitleaks 隐私扫描、osv-scanner 依赖漏洞、tag 命令预览 |
 | `dev_publish` | 上传 GitHub：README/LICENSE 校验、密钥扫描门槛、`gh repo create`、main 分支保护 |
+| `dev_worker` | codex worker 生命周期：`start` / `start_batch` / `status` / `list` / `kill` |
+
+编排层（只有 PLAN 项目用）：
+
+| 工具 | 作用 |
+|---|---|
+| `dev_projects` | 全局视图：每个项目的状态行、分支/脏文件/未推提交、活跃 worker、仓库路径 |
+| `dev_plan` | 把 PLAN.md 解析成结构化状态（状态行、决策表、阶段进度、待办、下一步） |
+| `dev_plan_update` | 定点写回计划：改状态行 / 勾一个步骤 / 追加 run 记录，返回 diff，匹配不唯一即拒写 |
+| `dev_flow` | 规范流程入口：`init` / `status` / `step` / `advance`，阶段 plan→execute→review→gate→release→publish 顺序固定，可断点续跑 |
 
 关键约束（由 `~/.config/yt-dev/config.toml` 决定，缺键取内置默认，不是写在提示词里）：
 
-- 一个 worker 只拿计划的一个切片（`scope`，按 `[limits] slice_max_chars` 硬截断，默认 4000 字符），并行用 `start_batch`（上限 `[limits] max_parallel`，默认 6），每个 worker 独立 `git worktree` + `<branch_prefix><id>` 分支。
+- 一个 worker 只拿计划的一个切片（`scope`，按 `[limits] slice_max_chars` 硬截断，默认 4000 字符）；没有 PLAN.md 时切片降级为「按任务描述执行，范围自限」，不报错。并行用 `start_batch`（上限 `[limits] max_parallel`，默认 6），每个 worker 独立 `git worktree` + `<branch_prefix><id>` 分支。
 - CPU/内存有硬上限：`systemd-run --user --scope` 的 `MemoryMax` / `CPUQuota`（`[limits] mem_mb` / `cpu_pct`，可按次覆盖），实测落在 cgroup 里。
 - 磁盘有产物上限（不是看剩余空间）：run 日志/元数据 + worktree 的总占用受 `[limits] max_store_mb` 约束（默认 4096 MB，可按次覆盖），触顶时先按 `keep_runs` 保留最近若干 run，再删最旧的已结束 run，最后删其遗留 worktree；运行中的 worker 永不删。
 - `kill` 只在显式调用时执行：先 SIGTERM 进程组，等 `[limits] kill_grace_secs`（默认 10s）再 SIGKILL。
 - 扫描命中一律脱敏输出（前 4 字符 + 长度），密钥原文不进报告。
 - `dev_publish` 默认 dry-run，license / README / 密钥任一不过就不推送；强推与删除永久禁用（这两项不开放配置）。
 
+
+## 配套提示词插件（可选）
+
+`hermes-plugin/yt-dev-nudge/` 是一个 Hermes 插件：`pre_llm_call` 在首轮（以及每 N 轮）注入一段几十字的提示，让模型记得「有计划的走 dev_flow，没计划的直接给 path 用单个工具」，并给一个明确的退出条件（用不上就说明理由，不许默默跳过）。MCP 本身没有任何 hook 能力，工具也是 deferred 的，没有这段提示时模型在长任务里基本不会想起它。
+
+```sh
+ln -s "$PWD/hermes-plugin/yt-dev-nudge" ~/.hermes/plugins/yt-dev-nudge
+hermes plugins enable yt-dev-nudge
+```
 
 ## 构建与安装
 
@@ -87,19 +104,44 @@ demo = [{ name = "lint", cmd = ["make", "lint"] }]
 
 `steps` 三个可选项：`name`（报告里的步骤名，省略用 cmd 第一个词）、`full_only`（只在 `scope=full` 跑）、`needs`（命中文件内容里必须出现的字样，比如 package.json 有没有 `"test"`）。
 
-状态与可选覆盖文件：
+状态与产物（能力层只写 XDG，与 `~/Plan` 无关；有 PLAN 的项目额外用软链把 runs 挂回计划目录）：
 
 ```
-~/.config/yt-dev/
-  config.toml        # 唯一可调文件
+~/.local/state/yt-dev/<repo-hash>/      # repo-hash = 规范化路径的 FNV-1a 16 hex
+  meta.json                              # 原始仓库路径、首见/最后活动
+  runs/<id>.{json,log}                   # worker run 元数据与 codex 原始输出
+  actions/<kind>.json                    # dev_flow 的 review/gate/release/publish 记录（按 HEAD 对齐）
+~/.config/yt-dev/                        # 用户级配置（仓库级 .yt-dev.toml 覆盖它）
+  config.toml        # 主配置
   projects.toml      # project → repo 路径显式映射（覆盖 PLAN.md 声明与同名目录启发式）
   gitleaks.toml      # 私有规则：家目录绝对路径 / 本地内网地址 / token 前缀 + allowlist
   worker-prompt.md   # 可选：覆盖 [worker] prompt，占位符 {project} {task} {scope} {slice} {plan_path} {rules} {mem_mb} {cpu_pct} {max_file_lines} {max_fn_lines}
   review-prompt.md   # 可选：覆盖 [review] prompt，占位符 {base} {task}
   LICENSE            # 可选：dev_publish 写进别的仓库的 license 正文
   ci.yml             # 可选：dev_publish 写进别的仓库的 CI 模板
-~/Plan/<project>/runs/<id>.{json,log}   # run 元数据与 codex 原始输出
+<repo>/.yt-dev.toml                      # 仓库级覆盖：gate / publish / worker / limits 四段
 ```
+
+仓库级 `.yt-dev.toml` 优先于用户级 config：拆件使用时不改用户配置也能让这个仓库自带门禁步骤与发布策略。强推、删分支、跳过密钥扫描、关分支保护这四类键在任何层级都不生效（写了只在 stderr 留一行）。
+
+## 拆件用 vs 走流程
+
+```sh
+# 只跑门禁（任意仓库，不需要计划）
+dev_gate        {"path": "/home/you/some-repo", "scope": "full"}
+# 只评审当前 diff
+dev_review      {"path": "/home/you/some-repo", "base": "HEAD~1"}
+# 只做发版预检
+dev_release     {"path": "/home/you/some-repo", "version": "0.4.0"}
+
+# 计划项目走完整流程
+dev_flow        {"action": "init", "project": "demo", "path": "/home/you/demo"}
+dev_flow        {"action": "status", "project": "demo"}
+dev_flow        {"action": "step", "project": "demo"}     # 推进一步
+dev_flow        {"action": "advance", "project": "demo"}  # 连推到卡住为止
+```
+
+`dev_flow` 的阶段顺序固定：plan → execute → review → gate → release → publish。状态读 `PLAN.md` 的勾选，执行记录按当前 HEAD 记在 XDG，换 commit 即失效，所以中断后 `status` 能接着跑。`publish` 阶段默认只预览，`apply: true` 才真推。
 
 计划文档形状（`dev_plan` / `dev_worker` 依赖它，标题词可在 `[plan]` 改）：
 
@@ -115,10 +157,11 @@ demo = [{ name = "lint", cmd = ["make", "lint"] }]
 
 ## 语言与编译约定
 
-这些是 worker prompt 里 `[worker] rules` 数组的条目（默认 11 条），不是代码：
+这些是 worker prompt 里 `[worker] rules` 数组的条目（默认 12 条），不是代码：
 
 - 新项目默认 Rust；已有源码的仓库沿用原语言，除非计划里明确写了重构/迁移。换语言不由 worker 决定，写进收尾说明交 YT。
 - Rust 日常验证用 `cargo check` / debug `cargo build`，`--release` 收尾验一次；release 用 `opt-level = 3` + `lto = "thin"`，fat LTO 只留给 CI 发版。
+- 取舍顺序：功能 > 性能 > 资源占用（CPU/内存/硬盘）；代码复杂度不作为约束，重构同此。
 - 门禁零容忍：fmt 无差异、clippy 与构建零 warning、测试零失败、零 error。CI 里 `RUSTFLAGS=-D warnings` 兜住 build/test，`cargo clippy --all-targets -- -D warnings` 兜住 lint；用 `#[allow]`、`-A`、删测试或注释掉代码通过门禁不算完成。
 
 同一份默认 rules 里还有两条通用硬约束：不许硬编码（路径/端口/上限/命令/URL 都从配置读并给默认值）、可扩展（多一种实现或多一个可调项只加配置或新模块，不改既有调用方）。改措辞、删一条、加一条只改 `[worker] rules`；改整体版式才动 `worker-prompt.md`。`dev_review` 的评审 prompt 同样会盯这两条。
