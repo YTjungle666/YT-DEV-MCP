@@ -10,6 +10,8 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings   # 构建与测试也不许有 warning，不只 clippy
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

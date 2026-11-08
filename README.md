@@ -115,10 +115,11 @@ demo = [{ name = "lint", cmd = ["make", "lint"] }]
 
 ## 语言与编译约定
 
-这些是 worker prompt 里 `[worker] rules` 数组的条目（默认 10 条），不是代码：
+这些是 worker prompt 里 `[worker] rules` 数组的条目（默认 11 条），不是代码：
 
 - 新项目默认 Rust；已有源码的仓库沿用原语言，除非计划里明确写了重构/迁移。换语言不由 worker 决定，写进收尾说明交 YT。
 - Rust 日常验证用 `cargo check` / debug `cargo build`，`--release` 收尾验一次；release 用 `opt-level = 3` + `lto = "thin"`，fat LTO 只留给 CI 发版。
+- 门禁零容忍：fmt 无差异、clippy 与构建零 warning、测试零失败、零 error。CI 里 `RUSTFLAGS=-D warnings` 兜住 build/test，`cargo clippy --all-targets -- -D warnings` 兜住 lint；用 `#[allow]`、`-A`、删测试或注释掉代码通过门禁不算完成。
 
 同一份默认 rules 里还有两条通用硬约束：不许硬编码（路径/端口/上限/命令/URL 都从配置读并给默认值）、可扩展（多一种实现或多一个可调项只加配置或新模块，不改既有调用方）。改措辞、删一条、加一条只改 `[worker] rules`；改整体版式才动 `worker-prompt.md`。`dev_review` 的评审 prompt 同样会盯这两条。
 

@@ -490,7 +490,7 @@ fn render_rules(rules: &[String]) -> String {
 }
 
 /// worker 的硬约束条目（config `[worker] rules` 覆盖）；`{…}` 占位符同样会被替换。
-pub const DEFAULT_RULES: [&str; 10] = [
+pub const DEFAULT_RULES: [&str; 11] = [
     "只执行，不提问；歧义按片段里的决策取舍。范围外的文件一律不碰，确需改动先写进最后的说明里而不是直接改。",
     "不硬编码：路径、端口、超时、上限、命令、模型名、外部 URL 都从配置文件或参数读，并给默认值与示例；代码里不留只有本机才成立的常量。",
     "可扩展：多一种实现、多一种来源、多一个可调项，只加配置或新模块，不改既有调用方；也不为“以后可能用到”提前抽象。",
@@ -498,6 +498,7 @@ pub const DEFAULT_RULES: [&str; 10] = [
     "资源上限：本进程 MemoryMax={mem_mb}M、CPUQuota={cpu_pct}%；不要起常驻进程，不要跑全量基准，不要下载大文件。",
     "性能优先：先看复杂度，避免 O(n²) 和每请求分配；复用仓库已有实现，不新造轮子；性能与可读性冲突时选性能，并注释说明。",
     "不 push、不打 tag、不改 PLAN.md。",
+    "门禁必须干净：fmt 无差异、clippy 与构建零 warning、测试零失败、零 error。任何 warning 都算没做完，不许用 #[allow]、-A、删测试或注释掉代码压过去；确实要留的例外写进最后说明交 YT 定。",
     "结束用一句话说明改了什么、没做什么。",
     "语言：新项目默认 Rust（跨平台核心、常驻进程、命令行工具一律 Rust）。仓库里已有源码的，沿用仓库原有的语言，不要为了“更现代”换语言；只有计划里明确写了“重构/迁移”，才按计划的边界换。要不要换语言不由你决定，写进最后说明留给 YT。",
     "Rust 构建时间：日常验证只跑 `cargo check` 或 debug `cargo build`，`--release` 收尾验一次就够；release 用 opt-level=3 + lto=\"thin\"，fat LTO 只留给 CI 发版。本机已装 sccache 与 mold 并写进 ~/.cargo/config.toml，不要覆盖或清掉。",
@@ -517,6 +518,7 @@ mod tests {
         assert!(all.contains("不硬编码"), "少了不硬编码约束");
         assert!(all.contains("可扩展"), "少了可扩展约束");
         assert!(all.contains("{max_file_lines}"), "行数上限要走占位符");
+        assert!(all.contains("零 warning"), "少了零警告门禁约束");
         assert!(DEFAULT_PROMPT.contains("{rules}"), "模板没接上 rules");
     }
 
