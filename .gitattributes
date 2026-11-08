@@ -1,0 +1,2 @@
+# Hermes 插件是本仓库的配套产物，不让 GitHub 语言统计把它算成 Python 仓库
+hermes-plugin/** linguist-vendored
