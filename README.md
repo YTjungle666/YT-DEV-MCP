@@ -38,8 +38,8 @@
 `hermes-plugin/yt-dev-nudge/` 是一个 Hermes 插件：`pre_llm_call` 在首轮（以及每 N 轮）注入一段几十字的提示，让模型记得「有计划的走 dev_flow，没计划的直接给 path 用单个工具」，并给一个明确的退出条件（用不上就说明理由，不许默默跳过）。MCP 本身没有任何 hook 能力，工具也是 deferred 的，没有这段提示时模型在长任务里基本不会想起它。
 
 ```sh
-ln -s "$PWD/hermes-plugin/yt-dev-nudge" ~/.hermes/plugins/yt-dev-nudge
-hermes plugins enable yt-dev-nudge
+cp -r "$PWD/hermes-plugin/yt-dev-nudge" ~/.hermes/plugins/
+hermes plugins enable yt-dev-nudge   # 改了插件内容后 enable 两次（disable+enable）触发网关重载
 ```
 
 ## 构建与安装
